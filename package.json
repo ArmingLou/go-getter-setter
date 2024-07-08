@@ -1,14 +1,14 @@
 {
   "name": "go-struct-to-json",
   "displayName": "Go Struct to JSON",
-  "description": "Go Struct conver to JSON randomly",
+  "description": "Go Struct conver to JSON template",
   "license": "MIT",
   "publisher": "Arming",
   "repository": {
     "type": "git",
     "url": "https://github.com/H0R15H0/go-getter-setter"
   },
-  "version": "1.0.1",
+  "version": "1.1.1",
   "engines": {
     "vscode": "^1.70.0"
   },

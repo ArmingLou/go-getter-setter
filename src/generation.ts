@@ -1,10 +1,12 @@
 import * as vscode from 'vscode';
 import { FieldFull } from './golang-parser/types';
 import { FIELD_TAG_LINE, FIELD_TYPE_STRUCT_Array_START, FIELD_TYPE_STRUCT_Array_START_2, FIELD_TYPE_STRUCT_END, FIELD_TYPE_STRUCT_START, FIELD_TYPE_STRUCT_START_2 } from './constants';
+// import * as path from 'path';
+// import { LanguageClient, LanguageClientOptions, ServerOptions, TransportKind } from 'vscode-languageclient/node';
+import * as fs from 'fs';
 
 
-
-export function executeGenerateCommand(
+export async function executeGenerateCommand(
   textEditor: vscode.TextEditor,
   edit: vscode.TextEditorEdit,
   noBackets: boolean = false
@@ -15,7 +17,7 @@ export function executeGenerateCommand(
     const end = selection.end.line;
     try {
       const struct = getFields(start, end, document);
-      let result = generate(edit, struct, noBackets);
+      let result = await generate(struct, noBackets);
       vscode.env.clipboard.writeText(result);
       vscode.window.showInformationMessage("生成的JSON内容已复制至粘贴板：\n" + result);
     } catch (err: any) {
@@ -29,14 +31,15 @@ export function executeGenerateCommand(
 function getFields(
   start: number,
   end: number,
-  document: vscode.TextDocument
+  document: vscode.TextDocument,
+  inTypeBackets: boolean = false
 ): FieldFull[] {
   let scope: { start: number; end: number };
   try {
-    scope = getStructScope(start, document);
+    scope = getStructScope(start, document, inTypeBackets);
   } catch (err) {
     if (start === end) throw err;
-    scope = getStructScope(end, document);
+    scope = getStructScope(end, document, inTypeBackets);
   }
 
   if (scope.start + 1 > scope.end - 1) {
@@ -52,23 +55,35 @@ function getFields(
   fields = res.map((line) => {
     const text = document.lineAt(line).text;
     const field = /^\s*([a-zA-Z_\.\d\}]*)\s*([\*\[\]a-zA-Z_\.\d\{\}]*)/;
-    const tag = /\s*`.*json:"(\-,)?([^,]*).*"/;
+    const tag = /\s*`.*json:"(\-,)?([^,"]*).*"/;
     const fs = field.exec(text);
     const tagJson = tag.exec(text);
     const tg = tagJson ? tagJson[1] ? tagJson[1] : tagJson[2] : '';
+    let pos: vscode.Position = new vscode.Position(line, 0);
     if (fs && fs.length > 1) {
       if (fs.length === 2 || fs[2] === '') {
+        if (fs[1] !== '') {
+          let idx = text.indexOf(fs[1]);
+          pos = new vscode.Position(line, idx);
+        }
         return {
           name: '',
           type: fs[1],
           tagJson: tg,
+          typePosition: pos,
+          document: document
         };
       }
-
+      if (fs[2] !== '') {
+        let idx = text.indexOf(fs[2]);
+        pos = new vscode.Position(line, idx);
+      }
       return {
         name: fs[1],
         type: fs[2],
         tagJson: tg,
+        typePosition: pos,
+        document: document
       };
     }
     return null;
@@ -79,7 +94,7 @@ function getFields(
     if (field.tagJson === '-' && field.type !== FIELD_TYPE_STRUCT_END) {
       return false;
     }
-    if (field.type === '') {
+    if (field.type === '' || field.type === 'chan') {
       return false;
     }
     //如果 field.name 不是大写开头
@@ -94,9 +109,13 @@ function getFields(
 
 function getStructScope(
   line: number,
-  document: vscode.TextDocument
+  document: vscode.TextDocument,
+  inTypeBackets: boolean = false
 ): { start: number; end: number } {
-  const head = /type\s+\w+\s+struct\s*{/;
+  let head = /type\s+\w+\s+struct\s*{/;
+  if (inTypeBackets) {
+    head = /\w+\s+struct\s*{/;
+  }
   const tail = /^\s*}/;
 
   let headLine = -1;
@@ -144,17 +163,18 @@ function getStructScope(
   return { start: headLine, end: tailLine };
 }
 
-function generate(
-  editBuilder: vscode.TextEditorEdit,
+
+
+async function generate(
   targets: FieldFull[],
   noBackets: boolean = false
-): string {
+): Promise<string> {
 
-  let res = getValueStrStruct(targets);
+  let res = await getValueStrStruct(targets);
 
   if (noBackets) {
     // 去掉头尾的括号
-    res = res.substring(1, res.length - 1)
+    res = res.substring(1, res.length - 1);
     return res;
   } else {
     return res;
@@ -207,6 +227,15 @@ function getValueStrBase(type: String): string {
     case 'bool':
       value = 'true';
       break;
+    case 'time.Time': case 'Time:':
+      value = '"2024-07-01T15:00:00+08:00"';
+      break;
+    case 'Decimal': case 'decimal.Decimal': //第三方常用类型
+      value = '123.456';
+      break;
+    case 'sql.NullTime': case 'NullTime'://第三方常用类型
+      value = '"2024-07-01T15:00:00+08:00"';
+      break;
     default:
       value = '';
       break;
@@ -214,7 +243,8 @@ function getValueStrBase(type: String): string {
   return value;
 }
 
-function getValueStrArray(type: string): string {
+async function getValueStrArray(position: vscode.Position,
+  document: vscode.TextDocument, type: string): Promise<string> {
   let value = '';
   //去掉前面[]
   if (type.startsWith('[]')) {
@@ -222,23 +252,29 @@ function getValueStrArray(type: string): string {
   }
   let fixedType = fixTypeStr(type);
   if (fixedType.startsWith('[]')) {
-    value = getValueStrArray(fixedType);
+    value = await getValueStrArray(position, document, fixedType);
   } else if (fixedType.startsWith('map[')) {
-    value = getValueStrMap(fixedType);
+    value = await getValueStrMap(position, document, fixedType);
+  } else if (fixedType === "struct" || fixedType === "struct{") {
+    value = "{}";
   } else if (fixedType === "interface{}") {
     value = "";
   } else {
     value = getValueStrBase(fixedType);
     if (value === '') {
-      // TODO Arming (2024-07-06) : 自定义类型
-      value = getSuffixName(fixedType);
+      //  (2024-07-06) : 自定义类型
+      value = await getValueStrCustomTypeFromPosition(position, document, fixedType);
+    }
+    if (value === '') {
+      return "";
     }
   }
 
   return "[" + value + "]"; //value;
 }
 
-function getValueStrMap(type: string): string {
+async function getValueStrMap(position: vscode.Position,
+  document: vscode.TextDocument, type: string): Promise<string> {
   let value = '';
 
   // 找到第一个"]"之后的字符串
@@ -248,16 +284,23 @@ function getValueStrMap(type: string): string {
   }
   let fixedType = fixTypeStr(type);
   if (fixedType.startsWith('[]')) {
-    value = getValueStrArray(fixedType);
+    value = await getValueStrArray(position, document, fixedType);
   } else if (fixedType.startsWith('map[')) {
-    value = getValueStrMap(fixedType);
+    value = await getValueStrMap(position, document, fixedType);
+  } else if (fixedType === "struct" || fixedType === "struct{") {
+    value = "{}";
   } else if (fixedType === "interface{}") {
     value = "null";
+  } else if (fixedType === "chan") {
+    return "";
   } else {
     value = getValueStrBase(fixedType);
     if (value === '') {
-      // TODO Arming (2024-07-06) : 自定义类型
-      value = getSuffixName(fixedType);
+      //  (2024-07-06) : 自定义类型
+      value = await getValueStrCustomTypeFromPosition(position, document, fixedType);
+    }
+    if (value === '') {
+      return "";
     }
   }
 
@@ -265,16 +308,18 @@ function getValueStrMap(type: string): string {
 }
 
 // 参数不包含 头{  和 尾} 的field
-function getValueStrStruct(fields: FieldFull[], wrapArray: boolean = false): string {
+async function getValueStrStruct(fields: FieldFull[]): Promise<string> {
   let result = '';
   let items: string[] = [];
 
   let inerIsArrStruct = false;
+  let inerIsMapStruct = false;
   let inerStructKey: string = '';
   let inerFields: FieldFull[] = [];
   let inerCount = 0;
 
-  fields.forEach((field) => {
+  // 是否在数组内
+  for (let field of fields) {
 
     let fixedType = fixTypeStr(field.type);
 
@@ -283,6 +328,7 @@ function getValueStrStruct(fields: FieldFull[], wrapArray: boolean = false): str
     if (inerCount > 0) {
       if (fixedType === FIELD_TYPE_STRUCT_START || fixedType === FIELD_TYPE_STRUCT_START_2
         || fixedType === FIELD_TYPE_STRUCT_Array_START || fixedType === FIELD_TYPE_STRUCT_Array_START_2
+        || fixedType === 'map[string]struct' || fixedType === 'map[string]struct{'
       ) {
         inerCount++;
         inerFields.push(field);
@@ -295,12 +341,22 @@ function getValueStrStruct(fields: FieldFull[], wrapArray: boolean = false): str
             if (key !== '') {
               inerStructKey = key; // 重置 structKey, 有 json tag
             }
-            items.push(inerStructKey + getValueStrStruct(inerFields, inerIsArrStruct) + ',');
+            let val = await getValueStrStruct(inerFields);
+            if (val !== '') {
+              if (inerIsArrStruct) {
+                val = '[' + val + ']';
+              }
+              if (inerIsMapStruct) {
+                val = '{"key":' + val + '}';
+              }
+              items.push(inerStructKey + val + ',');
+            }
           }
           inerStructKey = '';
           inerCount = 0;
           inerFields = [];
           inerIsArrStruct = false;
+          inerIsMapStruct = false;
         } else {
           inerFields.push(field);
         }
@@ -311,32 +367,50 @@ function getValueStrStruct(fields: FieldFull[], wrapArray: boolean = false): str
     } else {
       if (key === '' && fixedType !== FIELD_TYPE_STRUCT_END) {
         // 隐藏字段，嵌套 自定义类型
-        // TODO Arming (2024-07-06) : 获取定义的嵌套结构体的字段，生成对应的结构体
-        items.push(getSuffixName(field.type) + '(NoBackets) ,');
+        //  (2024-07-06) : 获取定义的嵌套结构体的字段，生成对应的结构体
+        let value = await getValueStrCustomTypeFromPosition(field.typePosition, field.document, fixedType, true);
+        if (value !== '') {
+          items.push(value + ',');
+        }
 
       } else if (fixedType === FIELD_TYPE_STRUCT_START || fixedType === FIELD_TYPE_STRUCT_START_2
-        || fixedType === FIELD_TYPE_STRUCT_Array_START || fixedType === FIELD_TYPE_STRUCT_Array_START_2) {
+        || fixedType === FIELD_TYPE_STRUCT_Array_START || fixedType === FIELD_TYPE_STRUCT_Array_START_2
+        || fixedType === 'map[string]struct' || fixedType === 'map[string]struct{') {
         if (fixedType === FIELD_TYPE_STRUCT_Array_START || fixedType === FIELD_TYPE_STRUCT_Array_START_2) {
           inerIsArrStruct = true;
         } else {
           inerIsArrStruct = false;
         }
+        if (fixedType === 'map[string]struct' || fixedType === 'map[string]struct{') {
+          inerIsMapStruct = true;
+        } else {
+          inerIsMapStruct = false;
+        }
         inerCount++;
         inerStructKey = key;
       } else if (fixedType.startsWith('[]')) {
-        items.push(key + getValueStrArray(fixedType) + ',');
+        let val = await getValueStrArray(field.typePosition, field.document, fixedType);
+        if (val !== '') {
+          items.push(key + val + ',');
+        }
       } else if (fixedType.startsWith('map[')) {
-        items.push(key + getValueStrMap(fixedType) + ',');
+
+        let val = await getValueStrMap(field.typePosition, field.document, fixedType);
+        if (val !== '') {
+          items.push(key + val + ',');
+        }
       } else {
         let value = getValueStrBase(fixedType);
         if (value === '') {
-          // TODO Arming (2024-07-06) : 自定义类型
-          value = getSuffixName(fixedType);
+          //  (2024-07-06) : 自定义类型
+          value = await getValueStrCustomTypeFromPosition(field.typePosition, field.document, fixedType);
         }
-        items.push(key + value + ' ,');
+        if (value !== '') {
+          items.push(key + value + ' ,');
+        }
       }
     }
-  });
+  }
 
 
   if (items.length > 0) {
@@ -348,9 +422,6 @@ function getValueStrStruct(fields: FieldFull[], wrapArray: boolean = false): str
 
   result = items.join('\n');
   result = '{\n' + result + '\n}';
-  if (wrapArray) {
-    result = '[' + result + ']';
-  }
   return result;
 }
 
@@ -361,4 +432,176 @@ function getSuffixName(type: string): string {
     return type.substring(index + 1);
   }
   return type;
+}
+
+async function getValueStrCustomTypeFromPosition(
+  position: vscode.Position,
+  document: vscode.TextDocument,
+  typeName: string,
+  noBackets: boolean = false
+): Promise<string> {
+
+  typeName = getSuffixName(typeName);
+  let res = typeName;
+  if (noBackets) {
+    res = res + '(NoBackets)';
+  }
+
+  // let serverModule = 'gopls'; // Assuming gopls is in your PATH
+  // let debugOptions = { execArgv: ['--nolazy', '--inspect=6009'] };
+
+  // let serverOptions: ServerOptions = {
+  //   run: { module: serverModule, transport: TransportKind.stdio },
+  //   debug: { module: serverModule, transport: TransportKind.stdio, options: debugOptions },
+  // };
+
+  // let clientOptions: LanguageClientOptions = {
+  //   documentSelector: [{ scheme: 'file', language: 'go' }],
+  // };
+
+  // let client = new LanguageClient('goLanguageServer', 'Go Language Server', serverOptions, clientOptions);
+
+
+  // try {
+  //   if (client.needsStart()) {
+  //     await client.start();
+  //   }
+  //   let result: vscode.Location = await client.sendRequest('textDocument/definition', {
+  //     textDocument: client.code2ProtocolConverter.asTextDocumentIdentifier(document),
+  //     position: client.code2ProtocolConverter.asPosition(position),
+  //   });
+
+  //   res = `Definition at: ${result.uri}:${result.range.start.line + 1}:${result.range.start.character + 1}`;
+
+  //   vscode.window.showInformationMessage(`Definition at: ${result.uri}:${result.range.start.line + 1}:${result.range.start.character + 1}`);
+
+  //   // 获取定义处的document对象
+  //   let textDocument = await vscode.workspace.openTextDocument(result.uri);
+  //   // 获取定义处的 第一行string
+  //   let line = textDocument.lineAt(result.range.start.line).text;
+  //   // 用正则表达式获取类型
+  //   let superTypeName = '';
+  //   let typeRec = /\s*type\s+[a-zA-Z_\d]+\s+([\*\[\]a-zA-Z_\.\d\{\}]*)/;
+  //   let m = typeRec.exec(line);
+  //   if (m) {
+  //     superTypeName = fixTypeStr(m[1]);
+  //   }
+
+  //   // 获取定义处的Positiont对象
+  //   let idx = line.indexOf(superTypeName);
+  //   let positionNew = new vscode.Position(result.range.start.line, idx);
+  //   res = await getValueStrCustomTypeFromPosition(positionNew, textDocument, superTypeName, noBackets);
+
+  // } catch (error) {
+  //   vscode.window.showErrorMessage(`gopls err: ${error}`);
+  // }
+  // if (client.isRunning()) {
+  //   await client.stop();
+  // }
+
+  // 根据正则内容，获取定义文件及对应的position
+  let typesStartRec = new RegExp('\\s*type\\s*\\(\\s*');
+  let typesEndRec = new RegExp('\\s*\\)\\s*');
+  let typeRecSingle = new RegExp('\\s*type\\s+' + typeName + '\\s+([\\*\\[\\]a-zA-Z_\\.\\d\\{\\}]*)');
+  let typeRecInBackets = new RegExp('\\s*' + typeName + '\\s+([\\*\\[\\]a-zA-Z_\\.\\d\\{\\}]*)');
+  let typeRec = typeRecSingle;
+  // 搜索整个工作空间，寻找匹配正则内容的 文件
+
+
+  const files = await vscode.workspace.findFiles('**/*.go');
+
+  for (const file of files) {
+    const filePath = file.fsPath;
+    const content = fs.readFileSync(filePath, 'utf8');
+
+    const lines = content.split('\n');
+    let lineCount = 0;
+    let idx = 0;
+    let superTypeName = '';
+    let open = false;
+    typeRec = typeRecSingle;
+
+    for (const line of lines) {
+      lineCount++;
+
+      if (!open) {
+        let start = typesStartRec.exec(line);
+        if (start && start[0] !== '') {
+          open = true;
+          typeRec = typeRecInBackets;
+          continue;
+        }
+      } else {
+        let end = typesEndRec.exec(line);
+        if (end && end[0] !== '') {
+          open = false;
+          typeRec = typeRecSingle;
+          continue;
+        }
+      }
+
+      if (line.startsWith('\tModel struct')) {
+        let m = typeRec.exec(line);
+        if (m) {
+          superTypeName = fixTypeStr(m[1]);
+          idx = line.indexOf(superTypeName);
+          break;
+        }
+      }
+
+
+      let m = typeRec.exec(line);
+      if (m) {
+        superTypeName = fixTypeStr(m[1]);
+        idx = line.indexOf(superTypeName);
+        break;
+      }
+    }
+
+
+    if (superTypeName !== '') {
+      // vscode.window.showInformationMessage(`File: ${filePath}, Matching lines: ${lineCount}, Position: ${idx}, Type: ${superTypeName}`);
+
+      // filePath 转换成 document
+      let textDocument = await vscode.workspace.openTextDocument(filePath);
+      let positionNew = new vscode.Position(lineCount, idx);
+
+      if (superTypeName.startsWith('[]')) {
+        res = await getValueStrArray(positionNew, textDocument, superTypeName);
+      } else if (superTypeName.startsWith('map[')) {
+        res = await getValueStrMap(positionNew, textDocument, superTypeName);
+      } else if (superTypeName === 'interface{}') {
+        if (noBackets) {
+          return '';
+        }
+        return 'null';
+      } else if (superTypeName === 'chan') {
+        return '';
+      } else if (superTypeName === 'struct' || superTypeName === 'struct{') {
+
+        try {
+          const struct = getFields(lineCount, lineCount, textDocument, open);
+          res = await generate(struct, noBackets);
+        } catch (err: any) {
+          vscode.window.showErrorMessage(`${err.toString()}`);
+        }
+
+        // if (noBackets) {
+        //   return '';
+        // }
+        // return '{}';
+      } else {
+        let value = getValueStrBase(superTypeName);
+        if (value === '') {
+          //  (2024-07-06) : 自定义类型
+          value = await getValueStrCustomTypeFromPosition(positionNew, textDocument, superTypeName);
+        }
+        res = value;
+      }
+
+      break;
+    }
+
+  }
+  return res;
 }
