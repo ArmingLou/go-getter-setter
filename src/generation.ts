@@ -54,8 +54,8 @@ function getFields(
   let fields: FieldFull[] = [];
   fields = res.map((line) => {
     const text = document.lineAt(line).text;
-    const field = /^\s*([a-zA-Z_\.\d\}]*)\s*([\*\[\]a-zA-Z_\.\d\{\}]*)/;
-    const tag = /\s*`.*json:"(\-,)?([^,"]*).*"/;
+    const field = /^\s*([\.\w\}]*)\s*([\*\[\]\.\w\{\}]*)/;
+    const tag = /^[^\/]*`.*json:"(\-,)?([^,"]*).*"/;
     const fs = field.exec(text);
     const tagJson = tag.exec(text);
     const tg = tagJson ? tagJson[1] ? tagJson[1] : tagJson[2] : '';
@@ -97,8 +97,8 @@ function getFields(
     if (field.type === '' || field.type === 'chan') {
       return false;
     }
-    //如果 field.name 不是大写开头
-    if (field.name !== '' && !/^[A-Z]/.test(field.name)) {
+    //如果 field.name 不是大写开头,且不是内部 struct，那么直接返回 false
+    if (field.name !== '' && !/^[A-Z]/.test(field.name) && !isInerStructStart(field)) {
       return false;
     }
     return true;
@@ -112,53 +112,97 @@ function getStructScope(
   document: vscode.TextDocument,
   inTypeBackets: boolean = false
 ): { start: number; end: number } {
-  let head = /type\s+\w+\s+struct\s*{/;
-  if (inTypeBackets) {
-    head = /\w+\s+struct\s*{/;
-  }
-  const tail = /^\s*}/;
+
+  const typesStartRec = /^\s*type\s*\(\s*/; //new RegExp('\\s*type\\s*\\(\\s*');
+  const typesEndRec = /^\s*\)\s*/; //new RegExp('\\s*\\)\\s*');
+  const typeRecSingle = /^\s*type\s+\w+\s+struct\s*\{/; //new RegExp('\\s*type\\s+\\w+\\s+struct\\s*\\{');
+  const typeRecInBackets = /^\s*\w+\s+[^\/\s]*\]?\*?struct\s*\{/; //new RegExp('\\s*\\w+\\s+struct\\s*\\{');
+  const typeTail = /^\s*}/;
 
   let headLine = -1;
   let tailLine = -1;
+  let backetStartLine = -1;
+
+  // 向上找定义开始行
   for (let l = line; l >= 0; l--) {
     const currentLine = document.lineAt(l).text;
-    if (head.exec(currentLine)) {
+    if (typeRecSingle.exec(currentLine)) {
       headLine = l;
       break;
     }
-    if (
-      l < line &&
-      tail.exec(currentLine) &&
-      !document.lineAt(l + 1).text.startsWith(currentLine.split('}')[0])
-    ) {
-      throw new Error('outside struct 2');
-    }
-  }
-  const headText = document.lineAt(headLine).text;
-  for (let l = line; l < document.lineCount; l++) {
-    const currentLine = document.lineAt(l).text;
-    if (
-      tail.exec(currentLine) &&
-      headText.startsWith(currentLine.split('}')[0])
-    ) {
-      tailLine = l;
+    if (typesStartRec.exec(currentLine)) {
+      backetStartLine = l;
       break;
     }
-    if (l > line && head.exec(document.lineAt(l).text)) {
-      throw new Error('outside struct');
+  }
+
+  if (headLine === -1 && backetStartLine === -1) {
+    throw new Error('outside struct 1');
+  }
+
+  // 在独立 type struct {} 定义中找到 定义 结束行
+  if (headLine > -1) {
+    let headCounts = 1;
+    let tailCounts = 0;
+    for (let l = headLine; l < document.lineCount; l++) {
+      const currentLine = document.lineAt(l).text;
+      if (typeRecInBackets.exec(currentLine)) {
+        headCounts++;
+      } else if (typeTail.exec(currentLine)) {
+        tailCounts++;
+      }
+
+      if (headCounts === tailCounts) {
+        tailLine = l;
+        break;
+      }
     }
+
+
+    if (tailLine === -1 || tailLine < line) {
+      throw new Error('outside struct 2');
+    }
+
   }
 
-  if (
-    (headLine === -1 && tailLine !== -1) ||
-    (headLine !== -1 && tailLine === -1)
-  ) {
-    throw new Error('invalid struct format');
+  // 在 type ( ) 中找到结构体定义开始 及 结束行
+  if (backetStartLine > -1) {
+    let headCounts = 0;
+    let tailCounts = 0;
+    let pass = false;
+    let head = -1;
+    for (let l = backetStartLine; l < document.lineCount; l++) {
+      const currentLine = document.lineAt(l).text;
+      if (l >= line) {
+        pass = true;
+      }
+      if (typeRecInBackets.exec(currentLine)) {
+        headCounts++;
+        if (head < 0) {
+          head = l;
+        }
+      } else if (typeTail.exec(currentLine)) {
+        tailCounts++;
+      } else if (typesEndRec.exec(currentLine)) {
+        break;
+      }
+      if (headCounts === tailCounts) {
+        if (pass) {
+          tailLine = l;
+          headLine = head;
+          break;
+        } else {
+          head = -1;
+        }
+      }
+    }
+
+    if (tailLine === -1) {
+      throw new Error('outside struct 3');
+    }
+
   }
 
-  if (headLine === -1 && tailLine === -1) {
-    throw new Error('no struct to generate');
-  }
 
   return { start: headLine, end: tailLine };
 }
@@ -312,11 +356,13 @@ async function getValueStrStruct(fields: FieldFull[]): Promise<string> {
   let result = '';
   let items: string[] = [];
 
-  let inerIsArrStruct = false;
-  let inerIsMapStruct = false;
+  // let inerIsArrStruct = false;
+  // let inerIsMapStruct = false;
   let inerStructKey: string = '';
+  let inerStructType: string = '';
   let inerFields: FieldFull[] = [];
   let inerCount = 0;
+  let inerIgore = false;
 
   // 是否在数组内
   for (let field of fields) {
@@ -326,16 +372,13 @@ async function getValueStrStruct(fields: FieldFull[]): Promise<string> {
     let key = getKeyStr(field);
 
     if (inerCount > 0) {
-      if (fixedType === FIELD_TYPE_STRUCT_START || fixedType === FIELD_TYPE_STRUCT_START_2
-        || fixedType === FIELD_TYPE_STRUCT_Array_START || fixedType === FIELD_TYPE_STRUCT_Array_START_2
-        || fixedType === 'map[string]struct' || fixedType === 'map[string]struct{'
-      ) {
+      if (isInerStructStart(field)) {
         inerCount++;
         inerFields.push(field);
       } else if (fixedType === FIELD_TYPE_STRUCT_END) {
         inerCount--;
         if (inerCount === 0) {
-          if (field.tagJson === "-") {
+          if (inerIgore || field.tagJson === "-") {
             // 不序列化. 删除结构体
           } else {
             if (key !== '') {
@@ -343,20 +386,33 @@ async function getValueStrStruct(fields: FieldFull[]): Promise<string> {
             }
             let val = await getValueStrStruct(inerFields);
             if (val !== '') {
-              if (inerIsArrStruct) {
+              if (inerStructType.startsWith('[][][]')) {
+                val = '[[[' + val + ']]]';
+              } else if (inerStructType.startsWith('[][]')) {
+                val = '[[' + val + ']]';
+              } else if (inerStructType.startsWith('[]map[')) {
+                if (inerStructType.endsWith('[]struct') || inerStructType.endsWith('[]struct{')) {
+                  val = '[{"key":[' + val + ']}]';
+                } else {
+                  val = '[{"key":' + val + '}]';
+                }
+              } else if (inerStructType.startsWith('[]')) {
                 val = '[' + val + ']';
-              }
-              if (inerIsMapStruct) {
-                val = '{"key":' + val + '}';
+              } else if (inerStructType.startsWith('map[')) {
+                if (inerStructType.endsWith('[]struct') || inerStructType.endsWith('[]struct{')) {
+                  val = '{"key":[' + val + ']}';
+                } else {
+                  val = '{"key":' + val + '}';
+                }
               }
               items.push(inerStructKey + val + ',');
             }
           }
           inerStructKey = '';
+          inerStructType = '';
           inerCount = 0;
           inerFields = [];
-          inerIsArrStruct = false;
-          inerIsMapStruct = false;
+          inerIgore = false;
         } else {
           inerFields.push(field);
         }
@@ -373,18 +429,12 @@ async function getValueStrStruct(fields: FieldFull[]): Promise<string> {
           items.push(value + ',');
         }
 
-      } else if (fixedType === FIELD_TYPE_STRUCT_START || fixedType === FIELD_TYPE_STRUCT_START_2
-        || fixedType === FIELD_TYPE_STRUCT_Array_START || fixedType === FIELD_TYPE_STRUCT_Array_START_2
-        || fixedType === 'map[string]struct' || fixedType === 'map[string]struct{') {
-        if (fixedType === FIELD_TYPE_STRUCT_Array_START || fixedType === FIELD_TYPE_STRUCT_Array_START_2) {
-          inerIsArrStruct = true;
+      } else if (isInerStructStart(field)) {
+        inerStructType = fixedType;
+        if (field.name !== '' && !/^[A-Z]/.test(field.name)) {
+          inerIgore = true;
         } else {
-          inerIsArrStruct = false;
-        }
-        if (fixedType === 'map[string]struct' || fixedType === 'map[string]struct{') {
-          inerIsMapStruct = true;
-        } else {
-          inerIsMapStruct = false;
+          inerIgore = false;
         }
         inerCount++;
         inerStructKey = key;
@@ -500,10 +550,10 @@ async function getValueStrCustomTypeFromPosition(
   // }
 
   // 根据正则内容，获取定义文件及对应的position
-  let typesStartRec = new RegExp('\\s*type\\s*\\(\\s*');
-  let typesEndRec = new RegExp('\\s*\\)\\s*');
-  let typeRecSingle = new RegExp('\\s*type\\s+' + typeName + '\\s+([\\*\\[\\]a-zA-Z_\\.\\d\\{\\}]*)');
-  let typeRecInBackets = new RegExp('\\s*' + typeName + '\\s+([\\*\\[\\]a-zA-Z_\\.\\d\\{\\}]*)');
+  const typesStartRec = new RegExp('^\\s*type\\s*\\(\\s*');
+  const typesEndRec = new RegExp('^\\s*\\)\\s*');
+  const typeRecSingle = new RegExp('^\\s*type\\s+' + typeName + '\\s+([\\*\\[\\]\\.\\w\\{\\}]+)');
+  const typeRecInBackets = new RegExp('^\\s*' + typeName + '\\s+([\\*\\[\\]\\.\\w\\{\\}]+)');
   let typeRec = typeRecSingle;
   // 搜索整个工作空间，寻找匹配正则内容的 文件
 
@@ -529,32 +579,24 @@ async function getValueStrCustomTypeFromPosition(
         if (start && start[0] !== '') {
           open = true;
           typeRec = typeRecInBackets;
-          continue;
-        }
-      } else {
-        let end = typesEndRec.exec(line);
-        if (end && end[0] !== '') {
-          open = false;
-          typeRec = typeRecSingle;
-          continue;
+          // continue;
         }
       }
-
-      if (line.startsWith('\tModel struct')) {
-        let m = typeRec.exec(line);
-        if (m) {
-          superTypeName = fixTypeStr(m[1]);
-          idx = line.indexOf(superTypeName);
-          break;
-        }
-      }
-
 
       let m = typeRec.exec(line);
       if (m) {
         superTypeName = fixTypeStr(m[1]);
         idx = line.indexOf(superTypeName);
         break;
+      }
+
+      if (open) {
+        let end = typesEndRec.exec(line);
+        if (end && end[0] !== '') {
+          open = false;
+          typeRec = typeRecSingle;
+          // continue;
+        }
       }
     }
 
@@ -583,7 +625,7 @@ async function getValueStrCustomTypeFromPosition(
           const struct = getFields(lineCount, lineCount, textDocument, open);
           res = await generate(struct, noBackets);
         } catch (err: any) {
-          vscode.window.showErrorMessage(`${err.toString()}`);
+          vscode.window.showErrorMessage(`getfields err: ${err.toString()}`);
         }
 
         // if (noBackets) {
@@ -604,4 +646,15 @@ async function getValueStrCustomTypeFromPosition(
 
   }
   return res;
+}
+
+
+function isInerStructStart(field: FieldFull): boolean {
+  let fixedType = fixTypeStr(field.type);
+  if (fixedType === FIELD_TYPE_STRUCT_START || fixedType === FIELD_TYPE_STRUCT_START_2
+    || fixedType.endsWith(']struct') || fixedType.endsWith(']struct{')
+  ) {
+    return true;
+  }
+  return false;
 }
