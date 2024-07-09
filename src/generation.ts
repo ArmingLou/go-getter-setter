@@ -32,14 +32,13 @@ function getFields(
   start: number,
   end: number,
   document: vscode.TextDocument,
-  inTypeBackets: boolean = false
 ): FieldFull[] {
   let scope: { start: number; end: number };
   try {
-    scope = getStructScope(start, document, inTypeBackets);
+    scope = getStructScope(start, document);
   } catch (err) {
     if (start === end) throw err;
-    scope = getStructScope(end, document, inTypeBackets);
+    scope = getStructScope(end, document);
   }
 
   if (scope.start + 1 > scope.end - 1) {
@@ -110,7 +109,6 @@ function getFields(
 function getStructScope(
   line: number,
   document: vscode.TextDocument,
-  inTypeBackets: boolean = false
 ): { start: number; end: number } {
 
   const typesStartRec = /^\s*type\s*\(\s*/; //new RegExp('\\s*type\\s*\\(\\s*');
@@ -277,7 +275,7 @@ function getValueStrBase(type: String): string {
     case 'Decimal': case 'decimal.Decimal': //第三方常用类型
       value = '123.456';
       break;
-    case 'sql.NullTime': case 'NullTime'://第三方常用类型
+    case 'sql.NullTime': case 'NullTime': case 'gorm.DeletedAt'://第三方常用类型
       value = '"2024-07-01T15:00:00+08:00"';
       break;
     default:
@@ -488,7 +486,8 @@ async function getValueStrCustomTypeFromPosition(
   position: vscode.Position,
   document: vscode.TextDocument,
   typeName: string,
-  noBackets: boolean = false
+  noBackets: boolean = false,
+  excludeFilePaths: string[] = [],
 ): Promise<string> {
 
   typeName = getSuffixName(typeName);
@@ -549,19 +548,93 @@ async function getValueStrCustomTypeFromPosition(
   //   await client.stop();
   // }
 
+
+  let superType = null;
+
+  // 优先 document 所在文件夹
+  let f = vscode.workspace.asRelativePath(document.uri);
+  const folder = f.substring(0, f.lastIndexOf('/')) + '/**/*.go';
+  const currentFiles = await vscode.workspace.findFiles(folder);
+  if (currentFiles.length > 0) {
+    superType = await getCustomTypeSuperFromFiles(typeName, currentFiles, excludeFilePaths);
+  }
+
+  // 再查整个工作空间目录
+  if (superType === null) {
+    const files = await vscode.workspace.findFiles('**/*.go', folder);
+    superType = await getCustomTypeSuperFromFiles(typeName, files, excludeFilePaths);
+  }
+
+  if (superType !== null) {
+
+    // filePath 转换成 document
+    let textDocument = await vscode.workspace.openTextDocument(superType.filePath);
+    let positionNew = new vscode.Position(superType.line, superType.idx);
+
+    if (superType.superTypeName.startsWith('[]')) {
+      res = await getValueStrArray(positionNew, textDocument, superType.superTypeName);
+    } else if (superType.superTypeName.startsWith('map[')) {
+      res = await getValueStrMap(positionNew, textDocument, superType.superTypeName);
+    } else if (superType.superTypeName === 'interface{}') {
+      if (noBackets) {
+        return '';
+      }
+      return 'null';
+    } else if (superType.superTypeName === 'chan') {
+      return '';
+    } else if (superType.superTypeName === 'struct' || superType.superTypeName === 'struct{') {
+
+      try {
+        const struct = getFields(superType.line, superType.line, textDocument);
+        res = await generate(struct, noBackets);
+      } catch (err: any) {
+        vscode.window.showErrorMessage(`getfields err: ${err.toString()}`);
+      }
+
+      // if (noBackets) {
+      //   return '';
+      // }
+      // return '{}';
+    } else {
+      let value = getValueStrBase(superType.superTypeName);
+      if (value === '') {
+        //  (2024-07-06) : 自定义类型
+        // 预防死循环
+        excludeFilePaths.push(superType.filePath);
+        value = await getValueStrCustomTypeFromPosition(positionNew, textDocument, superType.superTypeName, noBackets, excludeFilePaths);
+      }
+      res = value;
+    }
+  }
+
+
+  return res;
+}
+
+async function getCustomTypeSuperFromFiles(
+  typeName: string,
+  files: vscode.Uri[],
+  excludeFilePaths: string[] = [],
+): Promise<{ superTypeName: string, line: number, idx: number, filePath: string } | null> {
+
   // 根据正则内容，获取定义文件及对应的position
   const typesStartRec = new RegExp('^\\s*type\\s*\\(\\s*');
   const typesEndRec = new RegExp('^\\s*\\)\\s*');
   const typeRecSingle = new RegExp('^\\s*type\\s+' + typeName + '\\s+([\\*\\[\\]\\.\\w\\{\\}]+)');
   const typeRecInBackets = new RegExp('^\\s*' + typeName + '\\s+([\\*\\[\\]\\.\\w\\{\\}]+)');
+
+  const typeStructInBackets = /^\s*\w+\s+[^\/\s]*\]?\*?struct\s*\{/;
+  const typeStructTail = /^\s*}/;
+
   let typeRec = typeRecSingle;
   // 搜索整个工作空间，寻找匹配正则内容的 文件
 
 
-  const files = await vscode.workspace.findFiles('**/*.go');
-
   for (const file of files) {
     const filePath = file.fsPath;
+    if (excludeFilePaths.includes(filePath)) {
+      continue;
+    }
     const content = fs.readFileSync(filePath, 'utf8');
 
     const lines = content.split('\n');
@@ -570,6 +643,7 @@ async function getValueStrCustomTypeFromPosition(
     let superTypeName = '';
     let open = false;
     typeRec = typeRecSingle;
+    let structOpen = 0;
 
     for (const line of lines) {
       lineCount++;
@@ -583,18 +657,27 @@ async function getValueStrCustomTypeFromPosition(
         }
       }
 
-      let m = typeRec.exec(line);
-      if (m) {
-        superTypeName = fixTypeStr(m[1]);
-        idx = line.indexOf(superTypeName);
-        break;
+      if (structOpen === 0) { // 否则，可能是结构体内的字段
+        let m = typeRec.exec(line);
+        if (m) {
+          superTypeName = fixTypeStr(m[1]);
+          idx = line.indexOf(superTypeName);
+          break;
+        }
       }
 
       if (open) {
+        if (typeStructInBackets.exec(line)) {
+          structOpen++;
+        } else if (typeStructTail.exec(line)) {
+          structOpen--;
+        }
+
         let end = typesEndRec.exec(line);
         if (end && end[0] !== '') {
           open = false;
           typeRec = typeRecSingle;
+          structOpen = 0;
           // continue;
         }
       }
@@ -602,50 +685,18 @@ async function getValueStrCustomTypeFromPosition(
 
 
     if (superTypeName !== '') {
-      // vscode.window.showInformationMessage(`File: ${filePath}, Matching lines: ${lineCount}, Position: ${idx}, Type: ${superTypeName}`);
 
-      // filePath 转换成 document
-      let textDocument = await vscode.workspace.openTextDocument(filePath);
-      let positionNew = new vscode.Position(lineCount, idx);
+      return {
+        superTypeName: superTypeName,
+        line: lineCount,
+        idx: idx,
+        filePath: filePath
+      };
 
-      if (superTypeName.startsWith('[]')) {
-        res = await getValueStrArray(positionNew, textDocument, superTypeName);
-      } else if (superTypeName.startsWith('map[')) {
-        res = await getValueStrMap(positionNew, textDocument, superTypeName);
-      } else if (superTypeName === 'interface{}') {
-        if (noBackets) {
-          return '';
-        }
-        return 'null';
-      } else if (superTypeName === 'chan') {
-        return '';
-      } else if (superTypeName === 'struct' || superTypeName === 'struct{') {
-
-        try {
-          const struct = getFields(lineCount, lineCount, textDocument, open);
-          res = await generate(struct, noBackets);
-        } catch (err: any) {
-          vscode.window.showErrorMessage(`getfields err: ${err.toString()}`);
-        }
-
-        // if (noBackets) {
-        //   return '';
-        // }
-        // return '{}';
-      } else {
-        let value = getValueStrBase(superTypeName);
-        if (value === '') {
-          //  (2024-07-06) : 自定义类型
-          value = await getValueStrCustomTypeFromPosition(positionNew, textDocument, superTypeName);
-        }
-        res = value;
-      }
-
-      break;
     }
 
   }
-  return res;
+  return null;
 }
 
 
