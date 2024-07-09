@@ -301,6 +301,8 @@ async function getValueStrArray(position: vscode.Position,
     value = "{}";
   } else if (fixedType === "interface{}") {
     value = "";
+  } else if (fixedType === "chan") {
+    return "";//直接返回“”，将不序列化此字段
   } else {
     value = getValueStrBase(fixedType);
     if (value === '') {
@@ -308,7 +310,7 @@ async function getValueStrArray(position: vscode.Position,
       value = await getValueStrCustomTypeFromPosition(position, document, fixedType);
     }
     if (value === '') {
-      return "";
+      return "";//直接返回“”，将不序列化此字段
     }
   }
 
@@ -334,7 +336,7 @@ async function getValueStrMap(position: vscode.Position,
   } else if (fixedType === "interface{}") {
     value = "null";
   } else if (fixedType === "chan") {
-    return "";
+    return "";//直接返回“”，将不序列化此字段
   } else {
     value = getValueStrBase(fixedType);
     if (value === '') {
@@ -342,7 +344,7 @@ async function getValueStrMap(position: vscode.Position,
       value = await getValueStrCustomTypeFromPosition(position, document, fixedType);
     }
     if (value === '') {
-      return "";
+      return "";//直接返回“”，将不序列化此字段
     }
   }
 
@@ -447,6 +449,11 @@ async function getValueStrStruct(fields: FieldFull[]): Promise<string> {
         if (val !== '') {
           items.push(key + val + ',');
         }
+      } else if (fixedType === "interface{}") {
+        let value = "null";
+        items.push(key + value + ',');
+      } else if (fixedType === "chan") {
+        //直接返回“”，将不序列化此字段
       } else {
         let value = getValueStrBase(fixedType);
         if (value === '') {
@@ -454,7 +461,7 @@ async function getValueStrStruct(fields: FieldFull[]): Promise<string> {
           value = await getValueStrCustomTypeFromPosition(field.typePosition, field.document, fixedType);
         }
         if (value !== '') {
-          items.push(key + value + ' ,');
+          items.push(key + value + ',');
         }
       }
     }
