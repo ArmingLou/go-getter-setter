@@ -278,6 +278,9 @@ function getValueStrBase(type: String): string {
     case 'sql.NullTime': case 'NullTime': case 'gorm.DeletedAt'://第三方常用类型
       value = '"2024-07-01T15:00:00+08:00"';
       break;
+    case 'time.Duration':
+      value = '1234567890123';
+      break;
     default:
       value = '';
       break;
