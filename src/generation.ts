@@ -41,8 +41,12 @@ function getFields(
     scope = getStructScope(end, document);
   }
 
-  if (scope.start + 1 > scope.end - 1) {
+  if (scope.start > scope.end) {
     throw new Error(`invalid struct format (${document.fileName} : ${start}-${end} | found struct scope: ${scope.start}-${scope.end})`);
+  }
+
+  if (scope.start + 1 > scope.end - 1) {
+    return [];
   }
 
   let res: number[] = [];
