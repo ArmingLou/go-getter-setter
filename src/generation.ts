@@ -37,7 +37,7 @@ function getFields(
   try {
     scope = getStructScope(start, document);
   } catch (err) {
-    if (start === end) throw err;
+    if (start === end) { throw err; }
     scope = getStructScope(end, document);
   }
 
