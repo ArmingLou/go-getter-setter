@@ -319,7 +319,8 @@ function fixTypeStr(type: string): string {
   return type;
 }
 
-function getValueStrBase(type: String): string {
+function getValueStrBase(position: vscode.Position,
+  document: vscode.TextDocument, type: String): string {
 
 
   let value = '';
@@ -337,19 +338,27 @@ function getValueStrBase(type: String): string {
     case 'bool':
       value = 'true';
       break;
-    case 'time.Time': case 'Time:':
+    case 'interface{}': case 'struct{}': case 'struct':
+      value = '{}';
+      break;
+    case 'error':
+      value = '{}';
+      break;
+    case 'chan': //不支持序列化类型，异常提示
+      throw new Error(`该struct不能序列化, 因含有 ${type} 类型字段。 (${document.fileName} : ${position.line + 1})`);
+    case 'time.Time': case 'Time:': //常用的第三方类型
       value = '"2024-07-01T15:00:00+08:00"';
       break;
-    case 'Decimal': case 'decimal.Decimal': //第三方常用类型
+    case 'Decimal': case 'decimal.Decimal': //常用的第三方类型
       value = '123.456';
       break;
-    case 'sql.NullTime': case 'NullTime': case 'gorm.DeletedAt'://第三方常用类型
+    case 'sql.NullTime': case 'NullTime': case 'gorm.DeletedAt'://常用的第三方类型
       value = '"2024-07-01T15:00:00+08:00"';
       break;
-    case 'time.Duration':
+    case 'time.Duration': //常用的第三方类型
       value = '1234567890123';
       break;
-    default:
+    default: //其他自定义类型，返回空 ,下一步处理
       value = '';
       break;
   }
@@ -368,15 +377,8 @@ async function getValueStrArray(position: vscode.Position,
     value = await getValueStrArray(position, document, fixedType);
   } else if (fixedType.startsWith('map[')) {
     value = await getValueStrMap(position, document, fixedType);
-  } else if (fixedType === "struct" || fixedType === "struct{") {
-    value = "{}";
-  } else if (fixedType === "interface{}") {
-    value = "";
-  } else if (fixedType === "chan") {
-    throw new Error(`该struct不能序列化, 因为它含有 []chan 类型字段  (${document.fileName} : ${position.line + 1})`);
-    // return "";//直接返回“”，将不序列化此字段
   } else {
-    value = getValueStrBase(fixedType);
+    value = getValueStrBase(position, document, fixedType);
     if (value === '') {
       //  (2024-07-06) : 自定义类型
       value = await getValueStrCustomTypeFromPosition(position, document, fixedType);
@@ -403,15 +405,8 @@ async function getValueStrMap(position: vscode.Position,
     value = await getValueStrArray(position, document, fixedType);
   } else if (fixedType.startsWith('map[')) {
     value = await getValueStrMap(position, document, fixedType);
-  } else if (fixedType === "struct" || fixedType === "struct{") {
-    value = "{}";
-  } else if (fixedType === "interface{}") {
-    value = "null";
-  } else if (fixedType === "chan") {
-    throw new Error(`该struct不能序列化, 因为它含有 map[]chan 类型字段   (${document.fileName} : ${position.line + 1})`);
-    // return "";//直接返回“”，将不序列化此字段
   } else {
-    value = getValueStrBase(fixedType);
+    value = getValueStrBase(position, document, fixedType);
     if (value === '') {
       //  (2024-07-06) : 自定义类型
       value = await getValueStrCustomTypeFromPosition(position, document, fixedType);
@@ -545,18 +540,8 @@ async function getValueStrStruct(fields: FieldFull[]): Promise<string> {
             items.push(key + val + ',');
           }
         }
-      } else if (fixedType === "interface{}") {
-        let val = "null";
-        for (let key of keys) {
-          items.push(key + val + ',');
-        }
-      } else if (fixedType === "chan") {
-        // 报错提醒，该struct不能序列化
-        // vscode.window.showErrorMessage("该struct不能序列化:" + field.names + ' ' + field.type);
-        throw new Error(`该struct不能序列化  ${field.names} ${field.type} (${field.document.fileName} : ${field.typePosition.line + 1})`);
-        //直接返回“”，将不序列化此字段
       } else {
-        let value = getValueStrBase(fixedType);
+        let value = getValueStrBase(field.typePosition, field.document, fixedType);
         if (value === '') {
           //  (2024-07-06) : 自定义类型
           value = await getValueStrCustomTypeFromPosition(field.typePosition, field.document, fixedType);
@@ -685,32 +670,23 @@ async function getValueStrCustomTypeFromPosition(
       res = await getValueStrArray(positionNew, textDocument, superType.superTypeName);
     } else if (superType.superTypeName.startsWith('map[')) {
       res = await getValueStrMap(positionNew, textDocument, superType.superTypeName);
-    } else if (superType.superTypeName === 'interface{}') {
-      if (noBackets) {
-        return '';
-      }
-      return 'null';
-    } else if (superType.superTypeName === 'chan') {
-      return '';
     } else if (superType.superTypeName === 'struct' || superType.superTypeName === 'struct{') {
 
-      try {
-        const struct = getFields(superType.line, superType.line, textDocument);
-        res = await generate(struct, noBackets);
-      } catch (err: any) {
-        vscode.window.showErrorMessage(`getfields err: ${err.toString()}`);
-      }
+      const struct = getFields(superType.line, superType.line, textDocument);
+      res = await generate(struct, noBackets);
 
       // if (noBackets) {
       //   return '';
       // }
       // return '{}';
     } else {
-      let value = getValueStrBase(superType.superTypeName);
+      let value = getValueStrBase(positionNew, textDocument, superType.superTypeName);
       if (value === '') {
         //  (2024-07-06) : 自定义类型
         // 预防死循环
-        excludeFilePaths.push(superType.filePath);
+        if (typeName === superType.superTypeName) {
+          excludeFilePaths.push(superType.filePath);
+        }
         value = await getValueStrCustomTypeFromPosition(positionNew, textDocument, superType.superTypeName, noBackets, excludeFilePaths);
       }
       res = value;
@@ -757,7 +733,6 @@ async function getCustomTypeSuperFromFiles(
     let structOpen = 0;
 
     for (const line of lines) {
-      lineCount++;
 
       if (!open) {
         let start = typesStartRec.exec(line);
@@ -794,6 +769,7 @@ async function getCustomTypeSuperFromFiles(
           // continue;
         }
       }
+      lineCount++;
     }
 
 
