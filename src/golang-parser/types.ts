@@ -13,7 +13,7 @@ type Field = {
 
 
 export type FieldFull = {
-  names: string[];
+  names: string[] | null;//null 表示隐藏内嵌字段 或者 } 结尾
   type: string;
   tagJson: string;
   typePosition: Position;

@@ -92,13 +92,18 @@ function getFields(
     if (field.tagJson === '-' && field.type !== FIELD_TYPE_STRUCT_END) {
       return false;
     }
-    if (field.type === '' || field.type === 'chan') {
-      return false;
+    if (field.tagJson !== '') {
+      if (field.names) {
+        if (field.names.length > 1) {
+          return false; //公开字段名 大于 1 个，又指定了 json tag。则都不序列化。（go json.Marshal 的逻辑）
+        }
+      }
     }
-    //如果 field.name 不是大写开头,且不是内部 struct，那么直接返回 false
-    // if (field.names.length === 1 && !/^[A-Z]/.test(field.names[0]) && !isInerStructStart(field)) {
-    //   return false;
-    // }
+    if (field.names !== null) {
+      if (field.names.length === 0 && !isInerStructStart(field)) {
+        return false; //公开字段名 为 0 个，并且不是内嵌结构start，过滤掉
+      }
+    }
     return true;
   });
 
@@ -335,7 +340,8 @@ async function getValueStrArray(position: vscode.Position,
   } else if (fixedType === "interface{}") {
     value = "";
   } else if (fixedType === "chan") {
-    return "";//直接返回“”，将不序列化此字段
+    throw new Error(`该struct不能序列化, 因为它含有 []chan 类型字段  (${document.fileName} : ${position.line + 1})`);
+    // return "";//直接返回“”，将不序列化此字段
   } else {
     value = getValueStrBase(fixedType);
     if (value === '') {
@@ -369,7 +375,8 @@ async function getValueStrMap(position: vscode.Position,
   } else if (fixedType === "interface{}") {
     value = "null";
   } else if (fixedType === "chan") {
-    return "";//直接返回“”，将不序列化此字段
+    throw new Error(`该struct不能序列化, 因为它含有 map[]chan 类型字段   (${document.fileName} : ${position.line + 1})`);
+    // return "";//直接返回“”，将不序列化此字段
   } else {
     value = getValueStrBase(fixedType);
     if (value === '') {
@@ -386,6 +393,7 @@ async function getValueStrMap(position: vscode.Position,
 
 // 参数不包含 头{  和 尾} 的field
 async function getValueStrStruct(fields: FieldFull[]): Promise<string> {
+
   let result = '';
   let items: string[] = [];
 
@@ -396,7 +404,7 @@ async function getValueStrStruct(fields: FieldFull[]): Promise<string> {
   let inerStructStarField: FieldFull | null = null;
   let inerFields: FieldFull[] = [];
   let inerCount = 0;
-  let inerIgore = false;
+  // let inerIgore = false;
 
   // 是否在数组内
   for (let field of fields) {
@@ -412,8 +420,9 @@ async function getValueStrStruct(fields: FieldFull[]): Promise<string> {
       } else if (fixedType === FIELD_TYPE_STRUCT_END) {
         inerCount--;
         if (inerCount === 0) {
-          if (inerIgore || field.tagJson === "-") {
-            // 不序列化. 删除结构体
+          if (inerStructStarField?.names?.length === 0 || field.tagJson === "-" ||
+            (field.tagJson !== "" && inerStructStarField?.names?.length && inerStructStarField?.names.length > 1)) {
+            // 不序列化. 删除隐藏字段结构体
           } else {
 
             let startKeys = getKeyStr(inerStructStarField!);
@@ -461,7 +470,7 @@ async function getValueStrStruct(fields: FieldFull[]): Promise<string> {
           inerStructStarField = null;
           inerCount = 0;
           inerFields = [];
-          inerIgore = false;
+          // inerIgore = false;
         } else {
           inerFields.push(field);
         }
@@ -481,11 +490,11 @@ async function getValueStrStruct(fields: FieldFull[]): Promise<string> {
       } else if (isInerStructStart(field)) {
         inerStructStarField = field;
         // inerStructType = fixedType;
-        if (field.names.length === 0) {
-          inerIgore = true;
-        } else {
-          inerIgore = false;
-        }
+        // if (field.names.length === 0) {
+        //   inerIgore = true;
+        // } else {
+        //   inerIgore = false;
+        // }
         inerCount++;
         // inerStructKey = key;
       } else if (fixedType.startsWith('[]')) {
@@ -509,6 +518,9 @@ async function getValueStrStruct(fields: FieldFull[]): Promise<string> {
           items.push(key + val + ',');
         }
       } else if (fixedType === "chan") {
+        // 报错提醒，该struct不能序列化
+        // vscode.window.showErrorMessage("该struct不能序列化:" + field.names + ' ' + field.type);
+        throw new Error(`该struct不能序列化  ${field.names} ${field.type} (${field.document.fileName} : ${field.typePosition.line + 1})`);
         //直接返回“”，将不序列化此字段
       } else {
         let value = getValueStrBase(fixedType);
