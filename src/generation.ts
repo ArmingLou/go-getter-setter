@@ -42,7 +42,7 @@ function getFields(
   }
 
   if (scope.start + 1 > scope.end - 1) {
-    throw new Error('invalid struct format');
+    throw new Error(`invalid struct format (${document.fileName} : ${start}-${end} | found struct scope: ${scope.start}-${scope.end})`);
   }
 
   let res: number[] = [];
