@@ -119,10 +119,12 @@ function getStructScope(
   document: vscode.TextDocument,
 ): { start: number; end: number } {
 
-  const typesStartRec = /^\s*type\s*\(\s*/; //new RegExp('\\s*type\\s*\\(\\s*');
-  const typesEndRec = /^\s*\)\s*/; //new RegExp('\\s*\\)\\s*');
-  const typeRecSingle = /^\s*type\s+\w+\s+struct\s*\{/; //new RegExp('\\s*type\\s+\\w+\\s+struct\\s*\\{');
-  const typeRecInBackets = /^\s*\w+(\s*,\s*\w+)*\s+[^\/\s]*\]?\*?struct\s*\{/; //new RegExp('\\s*\\w+\\s+struct\\s*\\{');
+  const typesStartRec = /^\s*type\s*\(\s*/;
+  const typesEndRec = /^\s*\)\s*/;
+  const typeRecSingle = /^\s*type\s+\w+\s+struct\s*\{/;
+  const typeRecSingleEmpty = /^\s*type\s+\w+\s+struct\s*\{\s*\}/;
+  const typeRecInBackets = /^\s*\w+(\s*,\s*\w+)*\s+[^\/\s]*\]?\*?struct\s*\{/;
+  const typeRecInBacketsEmpty = /^\s*\w+(\s*,\s*\w+)*\s+[^\/\s]*\]?\*?struct\s*\{\s*\}/;
   const typeTail = /^\s*}/;
 
   let headLine = -1;
@@ -132,7 +134,12 @@ function getStructScope(
   // 向上找定义开始行
   for (let l = line; l >= 0; l--) {
     const currentLine = document.lineAt(l).text;
-    if (typeRecSingle.exec(currentLine)) {
+    if (typeRecSingleEmpty.exec(currentLine)) {
+      // 空struct定义
+      headLine = l;
+      tailLine = l;
+      break;
+    } else if (typeRecSingle.exec(currentLine)) {
       headLine = l;
       break;
     }
@@ -142,8 +149,16 @@ function getStructScope(
     }
   }
 
+  if (headLine === tailLine && headLine !== -1) {
+    //空struct
+    if (line !== headLine) {
+      throw new Error(`不是 struct (${document.fileName} : ${line + 1})`);
+    }
+    return { start: headLine, end: headLine };
+  }
+
   if (headLine === -1 && backetStartLine === -1) {
-    throw new Error('outside struct 1');
+    throw new Error(`不是 struct (${document.fileName} : ${line + 1})`);
   }
 
   // 在独立 type struct {} 定义中找到 定义 结束行
@@ -152,7 +167,9 @@ function getStructScope(
     let tailCounts = 0;
     for (let l = headLine; l < document.lineCount; l++) {
       const currentLine = document.lineAt(l).text;
-      if (typeRecInBackets.exec(currentLine)) {
+      if (typeRecInBacketsEmpty.exec(currentLine)) {
+        // headCounts++;
+      } else if (typeRecInBackets.exec(currentLine)) {
         headCounts++;
       } else if (typeTail.exec(currentLine)) {
         tailCounts++;
@@ -166,7 +183,7 @@ function getStructScope(
 
 
     if (tailLine === -1 || tailLine < line) {
-      throw new Error('outside struct 2');
+      throw new Error(`不是 struct (${document.fileName} : ${line + 1})`);
     }
 
   }
@@ -182,7 +199,13 @@ function getStructScope(
       if (l >= line) {
         pass = true;
       }
-      if (typeRecInBackets.exec(currentLine)) {
+      if (typeRecInBacketsEmpty.exec(currentLine)) {
+        // 空struct定义
+        // headCounts++;
+        if (head < 0) {
+          head = l;
+        }
+      } else if (typeRecInBackets.exec(currentLine)) {
         headCounts++;
         if (head < 0) {
           head = l;
@@ -204,9 +227,15 @@ function getStructScope(
     }
 
     if (tailLine === -1) {
-      throw new Error('outside struct 3');
+      throw new Error(`不是 struct (${document.fileName} : ${line + 1})`);
     }
 
+
+
+  }
+
+  if (headLine === -1) {
+    throw new Error(`不是 struct (${document.fileName} : ${line + 1})`);
   }
 
 
@@ -705,6 +734,7 @@ async function getCustomTypeSuperFromFiles(
   const typeRecInBackets = new RegExp('^\\s*' + typeName + '\\s+([\\*\\[\\]\\.\\w\\{\\}]+)');
 
   const typeStructInBackets = /^\s*\w+(\s*,\s*\w+)*\s+[^\/\s]*\]?\*?struct\s*\{/;
+  const typeStructInBacketsEmpty = /^\s*\w+(\s*,\s*\w+)*\s+[^\/\s]*\]?\*?struct\s*\{\s*\}/;
   const typeStructTail = /^\s*}/;
 
   let typeRec = typeRecSingle;
@@ -748,7 +778,9 @@ async function getCustomTypeSuperFromFiles(
       }
 
       if (open) {
-        if (typeStructInBackets.exec(line)) {
+        if (typeStructInBacketsEmpty.exec(line)) {
+          // structOpen++;
+        } else if (typeStructInBackets.exec(line)) {
           structOpen++;
         } else if (typeStructTail.exec(line)) {
           structOpen--;
