@@ -110,7 +110,7 @@ function getFields(
     }
     if (field.names === null && field.type !== FIELD_TYPE_STRUCT_END) {
       //隐藏字段
-      if (getKeyStrByType(field.type) === '') {
+      if (getKeyStrByType(field.type, field.tagJson) === '') {
         return false; // 私有的 隐藏字段，过滤掉
       }
     }
@@ -269,10 +269,20 @@ async function generate(
 
 }
 
-function getKeyStrByType(type: string): string {
+function getKeyStrByType(type: string, tagJson: string): string {
   let k = fixTypeStr(getSuffixName(type));
   if (/^[A-Z]/.test(k)) {
-    return k;
+    if (tagJson !== '') {
+      if (tagJson === FIELD_TAG_LINE) {
+        return '"-":';
+      } else if (tagJson === "-") {
+        return ''; //表示要隐藏
+      } else {
+        return '"' + tagJson + '":';
+      }
+    } else {
+      return '"' + k + '":';
+    }
   }
   return '';
 }
@@ -351,7 +361,10 @@ function getValueStrBase(position: vscode.Position,
     case 'bool':
       value = 'true';
       break;
-    case 'interface{}': case 'struct{}': case 'struct':
+    case 'interface{}':
+      value = 'null';
+      break;
+    case 'struct{}': case 'struct':
       value = '{}';
       break;
     case 'error':
@@ -524,18 +537,23 @@ async function getValueStrStruct(fields: FieldFull[]): Promise<string> {
         // 隐藏字段，嵌套 自定义类型
         //  (2024-07-06) : 获取定义的嵌套结构体的字段，生成对应的结构体
 
-        let keyname = getKeyStrByType(fixedType);
+        let keyname = getKeyStrByType(fixedType, field.tagJson);
         if (keyname !== '') {
           let v = await getValueStrBase(field.typePosition, field.document, fixedType);
           if (v !== '') {
-            items.push('"' + keyname + '":' + v + ',');
+            items.push(keyname + v + ',');
           } else {
-            let r = await getValueStrCustomTypeFromPosition(field.typePosition, field.document, fixedType, true);
+            let noTag = field.tagJson === '';
+            let r = await getValueStrCustomTypeFromPosition(field.typePosition, field.document, fixedType, noTag);
             if (r.val !== '') {
               if (r.isStruct) {
-                items.push(r.val + ',');
+                if (noTag) {
+                  items.push(r.val + ',');
+                } else {
+                  items.push(keyname + r.val + ','); //（go json.Marshal 的逻辑）隐藏字段struct类型 有json tag，则有 key
+                }
               } else {
-                items.push('"' + keyname + '":' + r.val + ',');
+                items.push(keyname + r.val + ',');
               }
             }
           }
