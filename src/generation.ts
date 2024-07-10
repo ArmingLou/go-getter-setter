@@ -53,38 +53,37 @@ function getFields(
   let fields: FieldFull[] = [];
   fields = res.map((line) => {
     const text = document.lineAt(line).text;
-    const field = /^\s*([\.\w\}]*)\s*([\*\[\]\.\w\{\}]*)/;
+    // const field = /^\s*(([\w]+)\s)?\s*([\*\[\]\.\w\{\}]+)/;
+    const fieldMulti = /^\s*([\w]+(\s*,\s*[\w]+)*\s)?\s*([\*\[\]\.\w\{\}]+)/;
     const tag = /^[^\/]*`.*json:"(\-,)?([^,"]*).*"/;
-    const fs = field.exec(text);
+    // const fs = field.exec(text);
+    const fsMult = fieldMulti.exec(text);
     const tagJson = tag.exec(text);
     const tg = tagJson ? tagJson[1] ? tagJson[1] : tagJson[2] : '';
     let pos: vscode.Position = new vscode.Position(line, 0);
-    if (fs && fs.length > 1) {
-      if (fs.length === 2 || fs[2] === '') {
-        if (fs[1] !== '') {
-          let idx = text.indexOf(fs[1]);
-          pos = new vscode.Position(line, idx);
-        }
-        return {
-          name: '',
-          type: fs[1],
-          tagJson: tg,
-          typePosition: pos,
-          document: document
-        };
-      }
-      if (fs[2] !== '') {
-        let idx = text.indexOf(fs[2]);
-        pos = new vscode.Position(line, idx);
-      }
+    if (fsMult) {
+      let idx = text.indexOf(fsMult[3]);
+      pos = new vscode.Position(line, idx);
+      let nameArr = fsMult[1] ? fsMult[1].split(',').map((name) => name.trim()).filter((name) => name !== '' && /^[A-Z]/.test(name)) : null;
       return {
-        name: fs[1],
-        type: fs[2],
+        names: nameArr, //null 表示隐藏内嵌字段 或者 } 结尾
+        type: fsMult[3],
         tagJson: tg,
         typePosition: pos,
         document: document
       };
     }
+    //  else if (fs) {
+    //   let idx = text.indexOf(fs[3]);
+    //   pos = new vscode.Position(line, idx);
+    //   return {
+    //     names: fs[2] ? [fs[2]] : [],
+    //     type: fs[3],
+    //     tagJson: tg,
+    //     typePosition: pos,
+    //     document: document
+    //   };
+    // }
     return null;
   }).filter((field): field is FieldFull => {
     if (field === null) {
@@ -97,9 +96,9 @@ function getFields(
       return false;
     }
     //如果 field.name 不是大写开头,且不是内部 struct，那么直接返回 false
-    if (field.name !== '' && !/^[A-Z]/.test(field.name) && !isInerStructStart(field)) {
-      return false;
-    }
+    // if (field.names.length === 1 && !/^[A-Z]/.test(field.names[0]) && !isInerStructStart(field)) {
+    //   return false;
+    // }
     return true;
   });
 
@@ -114,7 +113,7 @@ function getStructScope(
   const typesStartRec = /^\s*type\s*\(\s*/; //new RegExp('\\s*type\\s*\\(\\s*');
   const typesEndRec = /^\s*\)\s*/; //new RegExp('\\s*\\)\\s*');
   const typeRecSingle = /^\s*type\s+\w+\s+struct\s*\{/; //new RegExp('\\s*type\\s+\\w+\\s+struct\\s*\\{');
-  const typeRecInBackets = /^\s*\w+\s+[^\/\s]*\]?\*?struct\s*\{/; //new RegExp('\\s*\\w+\\s+struct\\s*\\{');
+  const typeRecInBackets = /^\s*\w+(\s*,\s*\w+)*\s+[^\/\s]*\]?\*?struct\s*\{/; //new RegExp('\\s*\\w+\\s+struct\\s*\\{');
   const typeTail = /^\s*}/;
 
   let headLine = -1;
@@ -227,21 +226,52 @@ async function generate(
 }
 
 
-function getKeyStr(field: FieldFull): string {
-  let key = field.name;
-  if (field.tagJson) {
-    if (field.tagJson === FIELD_TAG_LINE) {
-      key = '-';
-    } else if (field.tagJson === "-") {
-      key = '';
+function getKeyStr(field: FieldFull): string[] {
+
+  if (field.names === null) {
+    //null 表示隐藏内嵌字段 或者 } 结尾
+    if (field.type === FIELD_TYPE_STRUCT_END) {
+      if (field.tagJson) {
+        if (field.tagJson === FIELD_TAG_LINE) {
+          return ['"-":'];
+        } else if (field.tagJson === "-") {
+          return ['-']; //表示要隐藏
+        } else {
+          return ['"' + field.tagJson + '":'];
+        }
+      } else {
+        return [];
+      }
     } else {
-      key = field.tagJson;
+      return ['']; //表示内嵌隐藏字段
     }
   }
-  if (key === '') {
-    return '';
+
+  let res = [];
+  let tagCount = 0;
+  for (let name of field.names) {
+    let key = name;
+    if (field.tagJson) {
+      if (field.tagJson === FIELD_TAG_LINE) {
+        if (tagCount === 0) {
+          key = '-';
+          tagCount++;
+        }
+      } else if (field.tagJson === "-") {
+        key = '';
+      } else {
+        if (tagCount === 0) {
+          key = field.tagJson;
+          tagCount++;
+        }
+      }
+    }
+    if (key !== '') {
+      res.push('"' + key + '":');
+    }
   }
-  return '"' + key + '":';
+
+  return res;
 }
 
 function fixTypeStr(type: string): string {
@@ -361,8 +391,9 @@ async function getValueStrStruct(fields: FieldFull[]): Promise<string> {
 
   // let inerIsArrStruct = false;
   // let inerIsMapStruct = false;
-  let inerStructKey: string = '';
-  let inerStructType: string = '';
+  // let inerStructKey: string = '';
+  // let inerStructType: string = '';
+  let inerStructStarField: FieldFull | null = null;
   let inerFields: FieldFull[] = [];
   let inerCount = 0;
   let inerIgore = false;
@@ -372,7 +403,7 @@ async function getValueStrStruct(fields: FieldFull[]): Promise<string> {
 
     let fixedType = fixTypeStr(field.type);
 
-    let key = getKeyStr(field);
+    let keys = getKeyStr(field);
 
     if (inerCount > 0) {
       if (isInerStructStart(field)) {
@@ -384,35 +415,50 @@ async function getValueStrStruct(fields: FieldFull[]): Promise<string> {
           if (inerIgore || field.tagJson === "-") {
             // 不序列化. 删除结构体
           } else {
-            if (key !== '') {
-              inerStructKey = key; // 重置 structKey, 有 json tag
-            }
-            let val = await getValueStrStruct(inerFields);
-            if (val !== '') {
-              if (inerStructType.startsWith('[][][]')) {
-                val = '[[[' + val + ']]]';
-              } else if (inerStructType.startsWith('[][]')) {
-                val = '[[' + val + ']]';
-              } else if (inerStructType.startsWith('[]map[')) {
-                if (inerStructType.endsWith('[]struct') || inerStructType.endsWith('[]struct{')) {
-                  val = '[{"key":[' + val + ']}]';
-                } else {
-                  val = '[{"key":' + val + '}]';
+
+            let startKeys = getKeyStr(inerStructStarField!);
+            let inerStructType = fixTypeStr(inerStructStarField!.type);
+            let key = keys[0];
+            let tagCounts = 0;
+
+            for (let inerStructKey of startKeys) {
+              if (key) {
+                if (key === '-') {
+                  continue;
                 }
-              } else if (inerStructType.startsWith('[]')) {
-                val = '[' + val + ']';
-              } else if (inerStructType.startsWith('map[')) {
-                if (inerStructType.endsWith('[]struct') || inerStructType.endsWith('[]struct{')) {
-                  val = '{"key":[' + val + ']}';
-                } else {
-                  val = '{"key":' + val + '}';
+                if (tagCounts === 0) {
+                  inerStructKey = key;// 重置 structKey, 有 json tag
+                  tagCounts++;
                 }
               }
-              items.push(inerStructKey + val + ',');
+              let val = await getValueStrStruct(inerFields);
+              if (val !== '') {
+                if (inerStructType.startsWith('[][][]')) {
+                  val = '[[[' + val + ']]]';
+                } else if (inerStructType.startsWith('[][]')) {
+                  val = '[[' + val + ']]';
+                } else if (inerStructType.startsWith('[]map[')) {
+                  if (inerStructType.endsWith('[]struct') || inerStructType.endsWith('[]struct{')) {
+                    val = '[{"key":[' + val + ']}]';
+                  } else {
+                    val = '[{"key":' + val + '}]';
+                  }
+                } else if (inerStructType.startsWith('[]')) {
+                  val = '[' + val + ']';
+                } else if (inerStructType.startsWith('map[')) {
+                  if (inerStructType.endsWith('[]struct') || inerStructType.endsWith('[]struct{')) {
+                    val = '{"key":[' + val + ']}';
+                  } else {
+                    val = '{"key":' + val + '}';
+                  }
+                }
+                items.push(inerStructKey + val + ',');
+              }
             }
           }
-          inerStructKey = '';
-          inerStructType = '';
+          // inerStructKey = '';
+          // inerStructType = '';
+          inerStructStarField = null;
           inerCount = 0;
           inerFields = [];
           inerIgore = false;
@@ -424,7 +470,7 @@ async function getValueStrStruct(fields: FieldFull[]): Promise<string> {
       }
 
     } else {
-      if (key === '' && fixedType !== FIELD_TYPE_STRUCT_END) {
+      if (keys[0] === '') {
         // 隐藏字段，嵌套 自定义类型
         //  (2024-07-06) : 获取定义的嵌套结构体的字段，生成对应的结构体
         let value = await getValueStrCustomTypeFromPosition(field.typePosition, field.document, fixedType, true);
@@ -433,28 +479,35 @@ async function getValueStrStruct(fields: FieldFull[]): Promise<string> {
         }
 
       } else if (isInerStructStart(field)) {
-        inerStructType = fixedType;
-        if (field.name !== '' && !/^[A-Z]/.test(field.name)) {
+        inerStructStarField = field;
+        // inerStructType = fixedType;
+        if (field.names.length === 0) {
           inerIgore = true;
         } else {
           inerIgore = false;
         }
         inerCount++;
-        inerStructKey = key;
+        // inerStructKey = key;
       } else if (fixedType.startsWith('[]')) {
         let val = await getValueStrArray(field.typePosition, field.document, fixedType);
         if (val !== '') {
-          items.push(key + val + ',');
+          for (let key of keys) {
+            items.push(key + val + ',');
+          }
         }
       } else if (fixedType.startsWith('map[')) {
 
         let val = await getValueStrMap(field.typePosition, field.document, fixedType);
         if (val !== '') {
-          items.push(key + val + ',');
+          for (let key of keys) {
+            items.push(key + val + ',');
+          }
         }
       } else if (fixedType === "interface{}") {
-        let value = "null";
-        items.push(key + value + ',');
+        let val = "null";
+        for (let key of keys) {
+          items.push(key + val + ',');
+        }
       } else if (fixedType === "chan") {
         //直接返回“”，将不序列化此字段
       } else {
@@ -464,7 +517,9 @@ async function getValueStrStruct(fields: FieldFull[]): Promise<string> {
           value = await getValueStrCustomTypeFromPosition(field.typePosition, field.document, fixedType);
         }
         if (value !== '') {
-          items.push(key + value + ',');
+          for (let key of keys) {
+            items.push(key + value + ',');
+          }
         }
       }
     }
@@ -633,7 +688,7 @@ async function getCustomTypeSuperFromFiles(
   const typeRecSingle = new RegExp('^\\s*type\\s+' + typeName + '\\s+([\\*\\[\\]\\.\\w\\{\\}]+)');
   const typeRecInBackets = new RegExp('^\\s*' + typeName + '\\s+([\\*\\[\\]\\.\\w\\{\\}]+)');
 
-  const typeStructInBackets = /^\s*\w+\s+[^\/\s]*\]?\*?struct\s*\{/;
+  const typeStructInBackets = /^\s*\w+(\s*,\s*\w+)*\s+[^\/\s]*\]?\*?struct\s*\{/;
   const typeStructTail = /^\s*}/;
 
   let typeRec = typeRecSingle;

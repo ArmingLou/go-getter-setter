@@ -4,6 +4,8 @@ export const SELECT_BTN_SETTER = "Setter";
 
 export const FIELD_TAG_LINE = "-,";
 
+export const FIELD_NAME_EMPTY = "@";
+
 export const FIELD_TYPE_STRUCT_START = "struct";
 export const FIELD_TYPE_STRUCT_Array_START = "[]struct";
 export const FIELD_TYPE_STRUCT_START_2 = "struct{";

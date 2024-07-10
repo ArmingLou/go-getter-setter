@@ -13,7 +13,7 @@ type Field = {
 
 
 export type FieldFull = {
-  name: string;
+  names: string[];
   type: string;
   tagJson: string;
   typePosition: Position;
