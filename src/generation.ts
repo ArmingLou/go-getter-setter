@@ -108,6 +108,12 @@ function getFields(
         return false; //公开字段名 为 0 个，并且不是内嵌结构start，过滤掉
       }
     }
+    if (field.names === null && field.type !== FIELD_TYPE_STRUCT_END) {
+      //隐藏字段
+      if (getKeyStrByType(field.type) === '') {
+        return false; // 私有的 隐藏字段，过滤掉
+      }
+    }
     return true;
   });
 
@@ -263,6 +269,13 @@ async function generate(
 
 }
 
+function getKeyStrByType(type: string): string {
+  let k = fixTypeStr(getSuffixName(type));
+  if (/^[A-Z]/.test(k)) {
+    return k;
+  }
+  return '';
+}
 
 function getKeyStr(field: FieldFull): string[] {
 
@@ -381,7 +394,7 @@ async function getValueStrArray(position: vscode.Position,
     value = getValueStrBase(position, document, fixedType);
     if (value === '') {
       //  (2024-07-06) : 自定义类型
-      value = await getValueStrCustomTypeFromPosition(position, document, fixedType);
+      value = (await getValueStrCustomTypeFromPosition(position, document, fixedType)).val;
     }
     if (value === '') {
       return "";//直接返回“”，将不序列化此字段
@@ -409,7 +422,7 @@ async function getValueStrMap(position: vscode.Position,
     value = getValueStrBase(position, document, fixedType);
     if (value === '') {
       //  (2024-07-06) : 自定义类型
-      value = await getValueStrCustomTypeFromPosition(position, document, fixedType);
+      value = (await getValueStrCustomTypeFromPosition(position, document, fixedType)).val;
     }
     if (value === '') {
       return "";//直接返回“”，将不序列化此字段
@@ -510,9 +523,22 @@ async function getValueStrStruct(fields: FieldFull[]): Promise<string> {
       if (keys[0] === '') {
         // 隐藏字段，嵌套 自定义类型
         //  (2024-07-06) : 获取定义的嵌套结构体的字段，生成对应的结构体
-        let value = await getValueStrCustomTypeFromPosition(field.typePosition, field.document, fixedType, true);
-        if (value !== '') {
-          items.push(value + ',');
+
+        let keyname = getKeyStrByType(fixedType);
+        if (keyname !== '') {
+          let v = await getValueStrBase(field.typePosition, field.document, fixedType);
+          if (v !== '') {
+            items.push('"' + keyname + '":' + v + ',');
+          } else {
+            let r = await getValueStrCustomTypeFromPosition(field.typePosition, field.document, fixedType, true);
+            if (r.val !== '') {
+              if (r.isStruct) {
+                items.push(r.val + ',');
+              } else {
+                items.push('"' + keyname + '":' + r.val + ',');
+              }
+            }
+          }
         }
 
       } else if (isInerStructStart(field)) {
@@ -544,7 +570,7 @@ async function getValueStrStruct(fields: FieldFull[]): Promise<string> {
         let value = getValueStrBase(field.typePosition, field.document, fixedType);
         if (value === '') {
           //  (2024-07-06) : 自定义类型
-          value = await getValueStrCustomTypeFromPosition(field.typePosition, field.document, fixedType);
+          value = (await getValueStrCustomTypeFromPosition(field.typePosition, field.document, fixedType)).val;
         }
         if (value !== '') {
           for (let key of keys) {
@@ -583,8 +609,9 @@ async function getValueStrCustomTypeFromPosition(
   typeName: string,
   noBackets: boolean = false,
   excludeFilePaths: string[] = [],
-): Promise<string> {
+): Promise<{ val: string, isStruct: boolean }> {
 
+  let isStr = true;
   typeName = getSuffixName(typeName);
   let res = typeName;
   if (noBackets) {
@@ -668,12 +695,22 @@ async function getValueStrCustomTypeFromPosition(
 
     if (superType.superTypeName.startsWith('[]')) {
       res = await getValueStrArray(positionNew, textDocument, superType.superTypeName);
+      isStr = false;
     } else if (superType.superTypeName.startsWith('map[')) {
       res = await getValueStrMap(positionNew, textDocument, superType.superTypeName);
+      isStr = false;
+    } else if (superType.superTypeName === 'struct{}') {
+      if (noBackets) {
+        res = '';
+      } else {
+        res = '{}';
+      }
+      isStr = true;
     } else if (superType.superTypeName === 'struct' || superType.superTypeName === 'struct{') {
 
       const struct = getFields(superType.line, superType.line, textDocument);
       res = await generate(struct, noBackets);
+      isStr = true;
 
       // if (noBackets) {
       //   return '';
@@ -687,14 +724,18 @@ async function getValueStrCustomTypeFromPosition(
         if (typeName === superType.superTypeName) {
           excludeFilePaths.push(superType.filePath);
         }
-        value = await getValueStrCustomTypeFromPosition(positionNew, textDocument, superType.superTypeName, noBackets, excludeFilePaths);
+        let res2 = await getValueStrCustomTypeFromPosition(positionNew, textDocument, superType.superTypeName, noBackets, excludeFilePaths);
+        value = res2.val;
+        isStr = res2.isStruct;
+      } else {
+        isStr = false;
       }
       res = value;
     }
   }
 
 
-  return res;
+  return { val: res, isStruct: isStr };
 }
 
 async function getCustomTypeSuperFromFiles(
