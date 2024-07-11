@@ -158,13 +158,13 @@ function getStructScope(
   if (headLine === tailLine && headLine !== -1) {
     //空struct
     if (line !== headLine) {
-      throw new Error(`不是 struct (${document.fileName} : ${line + 1})`);
+      throw new Error(`光标不在 struct 内 (${document.fileName} : ${line + 1})`);
     }
     return { start: headLine, end: headLine };
   }
 
   if (headLine === -1 && backetStartLine === -1) {
-    throw new Error(`不是 struct (${document.fileName} : ${line + 1})`);
+    throw new Error(`光标不在 struct 内 (${document.fileName} : ${line + 1})`);
   }
 
   // 在独立 type struct {} 定义中找到 定义 结束行
@@ -189,7 +189,7 @@ function getStructScope(
 
 
     if (tailLine === -1 || tailLine < line) {
-      throw new Error(`不是 struct (${document.fileName} : ${line + 1})`);
+      throw new Error(`光标不在 struct 内 (${document.fileName} : ${line + 1})`);
     }
 
   }
@@ -233,7 +233,7 @@ function getStructScope(
     }
 
     if (tailLine === -1) {
-      throw new Error(`不是 struct (${document.fileName} : ${line + 1})`);
+      throw new Error(`光标不在 struct 内 (${document.fileName} : ${line + 1})`);
     }
 
 
@@ -241,7 +241,7 @@ function getStructScope(
   }
 
   if (headLine === -1) {
-    throw new Error(`不是 struct (${document.fileName} : ${line + 1})`);
+    throw new Error(`光标不在 struct (${document.fileName} : ${line + 1})`);
   }
 
 
@@ -259,7 +259,7 @@ async function generate(
 
   if (noBackets) {
     // 去掉头尾的括号
-    res = res.substring(1, res.length - 1);
+    res = res.substring(1, res.length - 1).trim();
     return res;
   } else {
     return res;
@@ -629,12 +629,9 @@ async function getValueStrCustomTypeFromPosition(
   excludeFilePaths: string[] = [],
 ): Promise<{ val: string, isStruct: boolean }> {
 
-  let isStr = true;
   typeName = getSuffixName(typeName);
-  let res = typeName;
-  if (noBackets) {
-    res = res + '(NoBackets)';
-  }
+  let isStr = false;
+  let res = '';
 
   // let serverModule = 'gopls'; // Assuming gopls is in your PATH
   // let debugOptions = { execArgv: ['--nolazy', '--inspect=6009'] };
@@ -717,14 +714,7 @@ async function getValueStrCustomTypeFromPosition(
     } else if (superType.superTypeName.startsWith('map[')) {
       res = await getValueStrMap(positionNew, textDocument, superType.superTypeName);
       isStr = false;
-    } else if (superType.superTypeName === 'struct{}') {
-      if (noBackets) {
-        res = '';
-      } else {
-        res = '{}';
-      }
-      isStr = true;
-    } else if (superType.superTypeName === 'struct' || superType.superTypeName === 'struct{') {
+    } else if (superType.superTypeName === 'struct{}' || superType.superTypeName === 'struct' || superType.superTypeName === 'struct{') {
 
       const struct = getFields(superType.line, superType.line, textDocument);
       res = await generate(struct, noBackets);
@@ -749,6 +739,13 @@ async function getValueStrCustomTypeFromPosition(
         isStr = false;
       }
       res = value;
+    }
+  } else {
+    isStr = true;
+    if (noBackets) {
+      res = typeName + '(NoBackets)';
+    } else {
+      res = typeName;
     }
   }
 
