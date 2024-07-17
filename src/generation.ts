@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { FieldFull } from './golang-parser/types';
+import { FieldFull, JsonItem } from './golang-parser/types';
 import { FIELD_TAG_LINE, FIELD_TYPE_STRUCT_Array_START, FIELD_TYPE_STRUCT_Array_START_2, FIELD_TYPE_STRUCT_END, FIELD_TYPE_STRUCT_START, FIELD_TYPE_STRUCT_START_2 } from './constants';
 // import * as path from 'path';
 // import { LanguageClient, LanguageClientOptions, ServerOptions, TransportKind } from 'vscode-languageclient/node';
@@ -17,7 +17,7 @@ export async function executeGenerateCommand(
     const end = selection.end.line;
     try {
       const struct = getFields(start, end, document);
-      let result = await generate(struct, noBackets);
+      let result = await getValueStrStruct(struct, noBackets);
       vscode.env.clipboard.writeText(result);
       vscode.window.showInformationMessage("生成的JSON内容已复制至粘贴板：\n" + result);
     } catch (err: any) {
@@ -158,13 +158,13 @@ function getStructScope(
   if (headLine === tailLine && headLine !== -1) {
     //空struct
     if (line !== headLine) {
-      throw new Error(`光标不在 struct 内 (${document.fileName} : ${line + 1})`);
+      throw new Error(`光标不在 struct 定义代码块内 (${document.fileName} : ${line + 1})`);
     }
     return { start: headLine, end: headLine };
   }
 
   if (headLine === -1 && backetStartLine === -1) {
-    throw new Error(`光标不在 struct 内 (${document.fileName} : ${line + 1})`);
+    throw new Error(`光标不在 struct 定义代码块内 (${document.fileName} : ${line + 1})`);
   }
 
   // 在独立 type struct {} 定义中找到 定义 结束行
@@ -189,7 +189,7 @@ function getStructScope(
 
 
     if (tailLine === -1 || tailLine < line) {
-      throw new Error(`光标不在 struct 内 (${document.fileName} : ${line + 1})`);
+      throw new Error(`光标不在 struct 定义代码块内 (${document.fileName} : ${line + 1})`);
     }
 
   }
@@ -233,7 +233,7 @@ function getStructScope(
     }
 
     if (tailLine === -1) {
-      throw new Error(`光标不在 struct 内 (${document.fileName} : ${line + 1})`);
+      throw new Error(`光标不在 struct 定义代码块内 (${document.fileName} : ${line + 1})`);
     }
 
 
@@ -241,7 +241,7 @@ function getStructScope(
   }
 
   if (headLine === -1) {
-    throw new Error(`光标不在 struct (${document.fileName} : ${line + 1})`);
+    throw new Error(`光标不在 struct 定义代码块内 (${document.fileName} : ${line + 1})`);
   }
 
 
@@ -250,38 +250,19 @@ function getStructScope(
 
 
 
-async function generate(
-  targets: FieldFull[],
-  noBackets: boolean = false
-): Promise<string> {
-
-  let res = await getValueStrStruct(targets);
-
-  if (noBackets) {
-    // 去掉头尾的括号
-    res = res.substring(1, res.length - 1).trim();
-    return res;
-  } else {
-    return res;
-  }
-
-
-
-}
-
 function getKeyStrByType(type: string, tagJson: string): string {
   let k = fixTypeStr(getSuffixName(type));
   if (/^[A-Z]/.test(k)) {
     if (tagJson !== '') {
       if (tagJson === FIELD_TAG_LINE) {
-        return '"-":';
+        return '-';
       } else if (tagJson === "-") {
         return ''; //表示要隐藏
       } else {
-        return '"' + tagJson + '":';
+        return tagJson;
       }
     } else {
-      return '"' + k + '":';
+      return k;
     }
   }
   return '';
@@ -293,18 +274,12 @@ function getKeyStr(field: FieldFull): string[] {
     //null 表示隐藏内嵌字段 或者 } 结尾
     if (field.type === FIELD_TYPE_STRUCT_END) {
       if (field.tagJson) {
-        if (field.tagJson === FIELD_TAG_LINE) {
-          return ['"-":'];
-        } else if (field.tagJson === "-") {
-          return ['-']; //表示要隐藏
-        } else {
-          return ['"' + field.tagJson + '":'];
-        }
+        return [field.tagJson];
       } else {
         return [];
       }
     } else {
-      return ['']; //表示内嵌隐藏字段
+      return []; //表示内嵌隐藏字段
     }
   }
 
@@ -328,7 +303,7 @@ function getKeyStr(field: FieldFull): string[] {
       }
     }
     if (key !== '') {
-      res.push('"' + key + '":');
+      res.push(key);
     }
   }
 
@@ -407,7 +382,7 @@ async function getValueStrArray(position: vscode.Position,
     value = getValueStrBase(position, document, fixedType);
     if (value === '') {
       //  (2024-07-06) : 自定义类型
-      value = (await getValueStrCustomTypeFromPosition(position, document, fixedType)).val;
+      value = (await getValueStrCustomTypeFromPosition(position, document, fixedType, 0)).val;
     }
     if (value === '') {
       return "";//直接返回“”，将不序列化此字段
@@ -435,7 +410,7 @@ async function getValueStrMap(position: vscode.Position,
     value = getValueStrBase(position, document, fixedType);
     if (value === '') {
       //  (2024-07-06) : 自定义类型
-      value = (await getValueStrCustomTypeFromPosition(position, document, fixedType)).val;
+      value = (await getValueStrCustomTypeFromPosition(position, document, fixedType, 0)).val;
     }
     if (value === '') {
       return "";//直接返回“”，将不序列化此字段
@@ -446,19 +421,37 @@ async function getValueStrMap(position: vscode.Position,
 }
 
 // 参数不包含 头{  和 尾} 的field
-async function getValueStrStruct(fields: FieldFull[]): Promise<string> {
+async function getValueStrStruct(fields: FieldFull[], noBackets: boolean = false): Promise<string> {
 
-  let result = '';
-  let items: string[] = [];
+  let mp = await getStructJsonItems(fields, 0);
+  return getValueStrStructByStructJsonItems(mp, noBackets);
+}
+async function getValueStrStructByStructJsonItems(items: JsonItem[], noBackets: boolean = false): Promise<string> {
 
-  // let inerIsArrStruct = false;
-  // let inerIsMapStruct = false;
-  // let inerStructKey: string = '';
-  // let inerStructType: string = '';
+  let res = items.filter(item => item.key !== '' && item.value !== '').map(item => {
+    if (item.value === '@') {
+      return item.key; //用来处理隐藏字段，没有找到自定义类型的情况
+    } else {
+      return '"' + item.key + '":' + item.value;
+    }
+  }).join(',');
+  if (noBackets) {
+    return res;
+  } else {
+    return '{' + res + '}';
+  }
+}
+async function getStructJsonItems(fields: FieldFull[], deep: number): Promise<JsonItem[]> {
+
+  // let result = '';
+  // let items: string[] = [];
+  let resItems: JsonItem[] = [];
+  // let outerItems: JsonItem[] = [];
+  // let innerItems: JsonItem[] = [];
+
   let inerStructStarField: FieldFull | null = null;
   let inerFields: FieldFull[] = [];
   let inerCount = 0;
-  // let inerIgore = false;
 
   // 是否在数组内
   for (let field of fields) {
@@ -515,7 +508,8 @@ async function getValueStrStruct(fields: FieldFull[]): Promise<string> {
                     val = '{"key":' + val + '}';
                   }
                 }
-                items.push(inerStructKey + val + ',');
+                // items.push(inerStructKey + val + ',');
+                resItems.push({ key: inerStructKey, value: val, deep: deep });
               }
             }
           }
@@ -533,7 +527,7 @@ async function getValueStrStruct(fields: FieldFull[]): Promise<string> {
       }
 
     } else {
-      if (keys[0] === '') {
+      if (field.names === null && field.type !== FIELD_TYPE_STRUCT_END) {
         // 隐藏字段，嵌套 自定义类型
         //  (2024-07-06) : 获取定义的嵌套结构体的字段，生成对应的结构体
 
@@ -541,20 +535,25 @@ async function getValueStrStruct(fields: FieldFull[]): Promise<string> {
         if (keyname !== '') {
           let v = await getValueStrBase(field.typePosition, field.document, fixedType);
           if (v !== '') {
-            items.push(keyname + v + ',');
+            // items.push(keyname + v + ',');
+            resItems.push({ key: keyname, value: v, deep: deep });
           } else {
             let noTag = field.tagJson === '';
-            let r = await getValueStrCustomTypeFromPosition(field.typePosition, field.document, fixedType, noTag);
-            if (r.val !== '') {
-              if (r.isStruct) {
-                if (noTag) {
-                  items.push(r.val + ',');
-                } else {
-                  items.push(keyname + r.val + ','); //（go json.Marshal 的逻辑）隐藏字段struct类型 有json tag，则有 key
-                }
+            let r = await getValueStrCustomTypeFromPosition(field.typePosition, field.document, fixedType, deep, noTag);
+            if (r.isStruct) {
+              if (noTag) {
+                // if (r.val !== '') {
+                //   // 未找到自定义类型 位置
+                //   innerItems.push({ key: r.val + '(NoBackets)', value: '@' }); // 将value设置成‘@’，特殊处理。
+                // } else {
+                resItems.push(...r.structKeyVal);
+                // }
               } else {
-                items.push(keyname + r.val + ',');
+                resItems.push({ key: keyname, value: r.val, deep: deep }); //（go json.Marshal 的逻辑）隐藏字段struct类型 有json tag，则有 key
               }
+            } else if (r.val !== '') {
+              // items.push(keyname + r.val + ',');
+              resItems.push({ key: keyname, value: r.val, deep: deep });
             }
           }
         }
@@ -573,7 +572,8 @@ async function getValueStrStruct(fields: FieldFull[]): Promise<string> {
         let val = await getValueStrArray(field.typePosition, field.document, fixedType);
         if (val !== '') {
           for (let key of keys) {
-            items.push(key + val + ',');
+            // items.push(key + val + ',');
+            resItems.push({ key: key, value: val, deep: deep });
           }
         }
       } else if (fixedType.startsWith('map[')) {
@@ -581,35 +581,93 @@ async function getValueStrStruct(fields: FieldFull[]): Promise<string> {
         let val = await getValueStrMap(field.typePosition, field.document, fixedType);
         if (val !== '') {
           for (let key of keys) {
-            items.push(key + val + ',');
+            // items.push(key + val + ',');
+            resItems.push({ key: key, value: val, deep: deep });
           }
         }
       } else {
         let value = getValueStrBase(field.typePosition, field.document, fixedType);
         if (value === '') {
           //  (2024-07-06) : 自定义类型
-          value = (await getValueStrCustomTypeFromPosition(field.typePosition, field.document, fixedType)).val;
+          value = (await getValueStrCustomTypeFromPosition(field.typePosition, field.document, fixedType, 0)).val;
         }
         if (value !== '') {
           for (let key of keys) {
-            items.push(key + value + ',');
+            // items.push(key + value + ',');
+            resItems.push({ key: key, value: value, deep: deep });
           }
         }
       }
     }
   }
 
+  // 处理 innerItems key 重复的情况
+  // innerItems = delJsonItemKeyDup(innerItems); // 删除key重复的项, go json.Marshal 的逻辑
+  // innerItems = delInerJsonItemKeyDup(innerItems, outerItems); // 优先使用显式声明的key，隐藏字段的结构体内部重复key冲突弃用
+  // outerItems = delJsonItemKeyDup(outerItems); //必须放最后. 删除key重复的项, go json.Marshal 的逻辑
 
-  if (items.length > 0) {
-    //去掉最后一个逗号
-    if (items[items.length - 1].endsWith(',')) {
-      items[items.length - 1] = items[items.length - 1].slice(0, -1);
+  resItems = delJsonItemDupKey(resItems); //go json.Marshal 的逻辑. 隐藏字段不同深度重复key的处理
+
+  return resItems;
+}
+
+function delJsonItemDupKey(items: JsonItem[]): JsonItem[] {
+  let res: JsonItem[] = [];
+  for (let i = 0; i < items.length; i++) {
+    let keep = true;
+    for (let j = 0; j < items.length; j++) {
+      if (i === j) {
+        continue;
+      }
+      if (items[i].key === items[j].key && items[i].deep >= items[j].deep) {
+        keep = false;
+        break;
+      }
+    }
+    if (keep) {
+      res.push(items[i]);
+    }
+  }
+  return res;
+}
+
+function delJsonItemKeyDup(items: JsonItem[]): JsonItem[] {
+  let res: JsonItem[] = [];
+  let keys: Map<string, number> = new Map();
+  for (let item of items) {
+    if (keys.has(item.key)) {
+      let count = keys.get(item.key);
+      keys.set(item.key, count! + 1);
+    } else {
+      keys.set(item.key, 1);
     }
   }
 
-  result = items.join('\n');
-  result = '{\n' + result + '\n}';
-  return result;
+  for (let item of items) {
+    if (keys.get(item.key)! > 1) {
+      continue;
+    } else {
+      res.push(item);
+    }
+  }
+  return res;
+}
+
+function delInerJsonItemKeyDup(items: JsonItem[], itemsOuter: JsonItem[]): JsonItem[] {
+  let res: JsonItem[] = [];
+  let outerKeys: string[] = [];
+  for (let item of itemsOuter) {
+    outerKeys.push(item.key);
+  }
+
+  for (let item of items) {
+    if (outerKeys.includes(item.key)) {
+      continue;
+    } else {
+      res.push(item);
+    }
+  }
+  return res;
 }
 
 // 获取后缀名称
@@ -625,13 +683,15 @@ async function getValueStrCustomTypeFromPosition(
   position: vscode.Position,
   document: vscode.TextDocument,
   typeName: string,
+  deep: number,
   noBackets: boolean = false,
   excludeFilePaths: string[] = [],
-): Promise<{ val: string, isStruct: boolean }> {
+): Promise<{ val: string, isStruct: boolean, structKeyVal: JsonItem[] }> {
 
   typeName = getSuffixName(typeName);
   let isStr = false;
   let res = '';
+  let structMp: JsonItem[] = [];
 
   // let serverModule = 'gopls'; // Assuming gopls is in your PATH
   // let debugOptions = { execArgv: ['--nolazy', '--inspect=6009'] };
@@ -717,7 +777,9 @@ async function getValueStrCustomTypeFromPosition(
     } else if (superType.superTypeName === 'struct{}' || superType.superTypeName === 'struct' || superType.superTypeName === 'struct{') {
 
       const struct = getFields(superType.line, superType.line, textDocument);
-      res = await generate(struct, noBackets);
+      structMp = await getStructJsonItems(struct, deep + 1);
+      // res = await getValueStrStruct(struct, noBackets);
+      res = await getValueStrStructByStructJsonItems(structMp, noBackets);
       isStr = true;
 
       // if (noBackets) {
@@ -732,9 +794,10 @@ async function getValueStrCustomTypeFromPosition(
         if (typeName === superType.superTypeName) {
           excludeFilePaths.push(superType.filePath);
         }
-        let res2 = await getValueStrCustomTypeFromPosition(positionNew, textDocument, superType.superTypeName, noBackets, excludeFilePaths);
+        let res2 = await getValueStrCustomTypeFromPosition(positionNew, textDocument, superType.superTypeName, deep, noBackets, excludeFilePaths);
         value = res2.val;
         isStr = res2.isStruct;
+        structMp = res2.structKeyVal;
       } else {
         isStr = false;
       }
@@ -747,10 +810,12 @@ async function getValueStrCustomTypeFromPosition(
     } else {
       res = typeName;
     }
+    let j: JsonItem = { key: res, value: '@', deep: deep };// 将value设置成‘@’，特殊处理。;
+    structMp = [j];
   }
 
 
-  return { val: res, isStruct: isStr };
+  return { val: res, isStruct: isStr, structKeyVal: structMp };
 }
 
 async function getCustomTypeSuperFromFiles(

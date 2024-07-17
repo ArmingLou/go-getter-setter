@@ -19,3 +19,9 @@ export type FieldFull = {
   typePosition: Position;
   document: TextDocument;
 };
+
+export type JsonItem = {
+  key: string;
+  value: string;
+  deep: number;
+};
