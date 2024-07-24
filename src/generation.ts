@@ -16,6 +16,8 @@ export async function executeGenerateCommand(
     const start = selection.start.line;
     const end = selection.end.line;
     try {
+      // vscode.window.showInformationMessage("开始：\n");
+
       const struct = getFields(start, end, document);
       let result = await getValueStrStruct(struct, noBackets);
       vscode.env.clipboard.writeText(result);
@@ -367,7 +369,7 @@ function getValueStrBase(position: vscode.Position,
 }
 
 async function getValueStrArray(position: vscode.Position,
-  document: vscode.TextDocument, type: string): Promise<string> {
+  document: vscode.TextDocument, type: string, excludeFilePaths: string[] = []): Promise<string> {
   let value = '';
   //去掉前面[]
   if (type.startsWith('[]')) {
@@ -375,14 +377,14 @@ async function getValueStrArray(position: vscode.Position,
   }
   let fixedType = fixTypeStr(type);
   if (fixedType.startsWith('[]')) {
-    value = await getValueStrArray(position, document, fixedType);
+    value = await getValueStrArray(position, document, fixedType, excludeFilePaths);
   } else if (fixedType.startsWith('map[')) {
-    value = await getValueStrMap(position, document, fixedType);
+    value = await getValueStrMap(position, document, fixedType, excludeFilePaths);
   } else {
     value = getValueStrBase(position, document, fixedType);
     if (value === '') {
       //  (2024-07-06) : 自定义类型
-      value = (await getValueStrCustomTypeFromPosition(position, document, fixedType, 0)).val;
+      value = (await getValueStrCustomTypeFromPosition(position, document, fixedType, 0, false, excludeFilePaths)).val;
     }
     if (value === '') {
       return "";//直接返回“”，将不序列化此字段
@@ -393,7 +395,7 @@ async function getValueStrArray(position: vscode.Position,
 }
 
 async function getValueStrMap(position: vscode.Position,
-  document: vscode.TextDocument, type: string): Promise<string> {
+  document: vscode.TextDocument, type: string, excludeFilePaths: string[] = []): Promise<string> {
   let value = '';
 
   // 找到第一个"]"之后的字符串
@@ -403,14 +405,14 @@ async function getValueStrMap(position: vscode.Position,
   }
   let fixedType = fixTypeStr(type);
   if (fixedType.startsWith('[]')) {
-    value = await getValueStrArray(position, document, fixedType);
+    value = await getValueStrArray(position, document, fixedType, excludeFilePaths);
   } else if (fixedType.startsWith('map[')) {
-    value = await getValueStrMap(position, document, fixedType);
+    value = await getValueStrMap(position, document, fixedType, excludeFilePaths);
   } else {
     value = getValueStrBase(position, document, fixedType);
     if (value === '') {
       //  (2024-07-06) : 自定义类型
-      value = (await getValueStrCustomTypeFromPosition(position, document, fixedType, 0)).val;
+      value = (await getValueStrCustomTypeFromPosition(position, document, fixedType, 0, false, excludeFilePaths)).val;
     }
     if (value === '') {
       return "";//直接返回“”，将不序列化此字段
@@ -769,14 +771,25 @@ async function getValueStrCustomTypeFromPosition(
     let positionNew = new vscode.Position(superType.line, superType.idx);
 
     if (superType.superTypeName.startsWith('[]')) {
-      res = await getValueStrArray(positionNew, textDocument, superType.superTypeName);
+      res = await getValueStrArray(positionNew, textDocument, superType.superTypeName, excludeFilePaths);
       isStr = false;
     } else if (superType.superTypeName.startsWith('map[')) {
-      res = await getValueStrMap(positionNew, textDocument, superType.superTypeName);
+      res = await getValueStrMap(positionNew, textDocument, superType.superTypeName, excludeFilePaths);
       isStr = false;
     } else if (superType.superTypeName === 'struct{}' || superType.superTypeName === 'struct' || superType.superTypeName === 'struct{') {
 
       const struct = getFields(superType.line, superType.line, textDocument);
+
+      if (struct !== null && struct.length > 0) {
+        for (let i = 0; i < struct.length; i++) {
+          if (struct[i].document.uri.fsPath === document.uri.fsPath && struct[i].typePosition.line === position.line) {
+            // 死循环，自定义字段的类型名称，与结构体的名称相同，但包不同。排除本文件，重新获取
+            excludeFilePaths.push(document.uri.fsPath);
+            return await getValueStrCustomTypeFromPosition(position, document, typeName, deep, noBackets, excludeFilePaths);
+          }
+        }
+      }
+
       structMp = await getStructJsonItems(struct, deep + 1);
       // res = await getValueStrStruct(struct, noBackets);
       res = await getValueStrStructByStructJsonItems(structMp, noBackets);
