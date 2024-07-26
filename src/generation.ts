@@ -681,16 +681,25 @@ function getSuffixName(type: string): string {
   return type;
 }
 
+function getPackageName(type: string): string {
+  let index = type.indexOf('.');
+  if (index > 0) {
+    return type.substring(0, index);
+  }
+  return '';
+}
+
 async function getValueStrCustomTypeFromPosition(
   position: vscode.Position,
   document: vscode.TextDocument,
-  typeName: string,
+  packtypeName: string,
   deep: number,
   noBackets: boolean = false,
   excludeFilePaths: string[] = [],
 ): Promise<{ val: string, isStruct: boolean, structKeyVal: JsonItem[] }> {
 
-  typeName = getSuffixName(typeName);
+  let packName = getPackageName(packtypeName);
+  let typeName = getSuffixName(packtypeName);
   let isStr = false;
   let res = '';
   let structMp: JsonItem[] = [];
@@ -750,9 +759,15 @@ async function getValueStrCustomTypeFromPosition(
 
   let superType = null;
 
-  // 优先 document 所在文件夹
-  let f = vscode.workspace.asRelativePath(document.uri);
-  const folder = f.substring(0, f.lastIndexOf('/')) + '/**/*.go';
+  let folder = "";
+  if (packName !== '') {
+    // 如果有包名，优先包名
+    folder = '**/' + packName + '/*.go';
+  } else {
+    // 优先 document 所在文件夹
+    let f = vscode.workspace.asRelativePath(document.uri);
+    folder = f.substring(0, f.lastIndexOf('/')) + '/**/*.go';
+  }
   const currentFiles = await vscode.workspace.findFiles(folder);
   if (currentFiles.length > 0) {
     superType = await getCustomTypeSuperFromFiles(typeName, currentFiles, excludeFilePaths);
@@ -785,7 +800,7 @@ async function getValueStrCustomTypeFromPosition(
           if (struct[i].document.uri.fsPath === document.uri.fsPath && struct[i].typePosition.line === position.line) {
             // 死循环，自定义字段的类型名称，与结构体的名称相同，但包不同。排除本文件，重新获取
             excludeFilePaths.push(document.uri.fsPath);
-            return await getValueStrCustomTypeFromPosition(position, document, typeName, deep, noBackets, excludeFilePaths);
+            return await getValueStrCustomTypeFromPosition(position, document, packtypeName, deep, noBackets, excludeFilePaths);
           }
         }
       }
@@ -804,7 +819,7 @@ async function getValueStrCustomTypeFromPosition(
       if (value === '') {
         //  (2024-07-06) : 自定义类型
         // 预防死循环
-        if (typeName === superType.superTypeName) {
+        if (typeName === getSuffixName(superType.superTypeName)) {
           excludeFilePaths.push(superType.filePath);
         }
         let res2 = await getValueStrCustomTypeFromPosition(positionNew, textDocument, superType.superTypeName, deep, noBackets, excludeFilePaths);
