@@ -698,6 +698,7 @@ async function getValueStrCustomTypeFromPosition(
   excludeFilePaths: string[] = [],
 ): Promise<{ val: string, isStruct: boolean, structKeyVal: JsonItem[] }> {
 
+  packtypeName = fixTypeStr(packtypeName);
   let packName = getPackageName(packtypeName);
   let typeName = getSuffixName(packtypeName);
   let isStr = false;
